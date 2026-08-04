@@ -1,0 +1,23 @@
+# Core (Phase 0–1): model loading, generation, data
+torch>=2.4
+transformers>=4.51        # Qwen3 support — verify exact version on the cloud box
+accelerate>=0.34
+datasets>=3.0
+numpy
+pandas
+
+# Probes & analysis (Phase 3)
+scikit-learn
+matplotlib
+
+# LoRA fine-tuning (Phase 4) — uncomment when we get there
+# peft>=0.13
+# trl>=0.11
+
+# Offline generation (Phase 1) + serving benchmark (Phase 5) — pin exact version on the GPU box
+vllm>=0.18             # Phase 1: offline batched sampling; Phase 5: native extract_hidden_states
+# vllm-lens            # UK AISI — decode-time extraction under continuous batching
+# nano-vllm            # readable control harness (likely install from source)
+
+# NOTE: exact versions get pinned during cloud setup, after verifying vLLM / vllm-lens
+# availability against July-2026 tooling (see DESIGN.md §11 risks).

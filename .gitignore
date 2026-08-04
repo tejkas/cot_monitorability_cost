@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+
+# Data & artifacts (large / regenerable)
+data/*
+!data/.gitkeep
+results/*
+!results/.gitkeep
+activations/
+*.safetensors
+*.pt
+*.npy
+*.arrow
+
+# Model / HF caches
+.cache/
+hf_cache/
+hf/
+
+# Model weights
+*.bin
+*.gguf
+
+# Build artifacts
+*.tar.gz
+*.zip
+
+# Reference PDFs — kept locally on the Mac, not in the code repo (33 MB).
+# Remove this line if you ever want them version-controlled.
+papers/
