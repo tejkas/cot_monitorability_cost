@@ -45,8 +45,8 @@ HINT_FAMILIES = ["sycophancy", "authority"]
 GEN_TEMPERATURE = 0.6
 GEN_TOP_P = 0.95
 GEN_TOP_K = 20
-GEN_MAX_NEW_TOKENS = 4096    # thinking traces on MMLU-Pro run long; 2048 truncated a biased tail
-MAX_MODEL_LEN = 8192         # prompt + generation budget for the vLLM engine (KV-cache sizing)
+GEN_MAX_NEW_TOKENS = 8192    # pilot: 4096 truncated ~29% of questions (0 valid samples) — recover the long tail
+MAX_MODEL_LEN = 16384        # prompt + generation budget for the vLLM engine (KV-cache sizing)
 SEED = 0
 
 

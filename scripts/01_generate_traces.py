@@ -78,6 +78,12 @@ def main() -> None:
     n_opts = [len(q["options"]) for q in qs]
     unhinted = G.sample(user_turns, args.k, n_opts)
 
+    # Truncation diagnostic: samples that hit the token cap never emit </think> -> unparseable.
+    n_samp = sum(len(s) for s in unhinted)
+    n_trunc = sum(1 for s in unhinted for x in s if x.finish_reason == "length")
+    print(f"[phase1] Stage A truncated (finish_reason=length): {n_trunc}/{n_samp} "
+          f"({n_trunc / max(1, n_samp):.0%}) — these are the main capability-filter loss")
+
     capable, q_summ = [], []
     for q, samples, n_opt in zip(qs, unhinted, n_opts):
         p0, n_valid = lab.distribution(samples, n_opt)

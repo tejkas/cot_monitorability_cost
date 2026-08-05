@@ -57,12 +57,15 @@ _cotmon_setup() {
   source .venv/bin/activate || { echo "[setup] ERROR: could not activate .venv"; return 1; }
 
   # --- deps: skip if already installed unless --fresh ---
+  # IMPORTANT (learned the hard way 2026-08-04): modern vLLM hard-pins a recent torch
+  # (vLLM 0.26 -> torch==2.11, built for CUDA 13.0). You CANNOT reuse an older base-image
+  # torch — vLLM refuses it. Instead the GPU NODE's driver must be new enough for that
+  # CUDA. On RunPod, launch the pod filtered to **CUDA 13.0** (not a 12.8 node), else
+  # engine init dies with "NVIDIA driver too old". On a correct node, the plain install
+  # below just works.
   if [ "$fresh" = 1 ] || [ ! -f .venv/.deps_installed ]; then
-    echo "[setup] installing deps (slow: vLLM + torch) ..."
+    echo "[setup] installing deps (vLLM pulls its matching torch) ..."
     python -m pip install --upgrade pip wheel || return 1
-    # vLLM pins its own torch build. Install it FIRST so torch resolves to the
-    # version vLLM needs; requirements.txt (torch>=2.4) is then already satisfied
-    # and pip won't try to bump torch and start a conflict.
     pip install vllm || { echo "[setup] ERROR: vllm install failed"; return 1; }
     pip install -r requirements.txt || { echo "[setup] ERROR: requirements install failed"; return 1; }
     touch .venv/.deps_installed

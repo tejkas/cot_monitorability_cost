@@ -67,6 +67,7 @@ class Sample:
     answer: Optional[str]  # parsed option letter, or None if unparseable/truncated
     cot: str               # the <think> content — what monitors/probes read later
     raw: str               # full raw completion (kept for debugging)
+    finish_reason: Optional[str] = None  # vLLM: "length" == hit token cap (TRUNCATED); "stop" == completed
 
 
 class Generator:
@@ -103,6 +104,7 @@ class Generator:
             samples = []
             for comp in out.outputs:
                 cot, ans_text = split_cot_answer(comp.text)
-                samples.append(Sample(answer=parse_answer(ans_text, n_opt), cot=cot, raw=comp.text))
+                samples.append(Sample(answer=parse_answer(ans_text, n_opt), cot=cot,
+                                      raw=comp.text, finish_reason=comp.finish_reason))
             results.append(samples)
         return results
