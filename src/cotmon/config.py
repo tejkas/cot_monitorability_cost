@@ -5,8 +5,6 @@ magic strings get scattered across phase scripts.
 """
 from pathlib import Path
 
-import torch
-
 # ---- Paths ----
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data"
@@ -16,8 +14,16 @@ ACTIVATIONS_DIR = DATA_DIR / "activations"
 # ---- Models ----
 BASE_MODEL = "Qwen/Qwen3-8B"  # primary: toggleable thinking on ONE checkpoint (clean CoT-on/off delta)
 BACKUP_MODELS = ["Qwen/Qwen3-4B-Thinking-2507", "HuggingFaceTB/SmolLM3-3B"]
-# Text-monitor judge (Phase 3): a DIFFERENT small model, to avoid same-model bias.
-JUDGE_MODEL = "Qwen/Qwen3-4B-Instruct-2507"  # placeholder; revisit in Phase 3
+# --- Phase 3 readers (NOT used in Phase 1/2; finalize in Phase 3) ---
+# Two DISTINCT roles — do not collapse them (derived 2026-08-06):
+#   TEXT_MONITOR: the reported monitor whose degradation across tiers IS the RQ1 result.
+#     Must differ from REWRITER_MODEL (else it grades its own rewrites) and from BASE_MODEL
+#     (same-model bias with the probed model). May be weak — its weakness is the phenomenon.
+#   FAITHFULNESS_JUDGE: certifies tiers preserve the label via the T0-vs-T1 recovery gap.
+#     Must be STRONG (near-ceiling on legible text, so a failure means the signal is truly
+#     gone) and INDEPENDENT of the rewriter. Never a reported result -> may be as large as fits.
+TEXT_MONITOR_MODEL = "HuggingFaceTB/SmolLM3-3B"  # DIFFERENT family from rewriter(4B) & base(8B) -> clean independence
+FAITHFULNESS_JUDGE_MODEL = "Qwen/Qwen3-14B"      # stronger + independent of the 4B rewriter
 
 # ---- Data (Phase 1) ----
 PRIMARY_DATASET = "TIGER-Lab/MMLU-Pro"   # workhorse (difficulty-filtered in Phase 1) — verify ID on box
@@ -26,6 +32,10 @@ GENERALIZATION_EVAL = "Idavidrein/gpqa"  # GPQA-Diamond, OPTIONAL Phase-3 add-on
 # ---- Legibility tiers (Phase 2) ----
 N_TIERS = 4  # T0 verbatim -> T3 near-unreadable
 TIER_NAMES = ["T0_verbatim", "T1_mild", "T2_telegraphic", "T3_heavy"]
+REWRITER_MODEL = "Qwen/Qwen3-4B-Instruct-2507"  # SEPARATE from the base 8B; non-thinking instruct
+REWRITE_TEMPERATURE = 0.3    # low -> faithful, consistent rewrites (not greedy: avoids loops)
+REWRITE_TOP_P = 0.9
+REWRITE_MAX_TOKENS = 8192    # T1 (clean prose) can approach input length; cap generously
 
 # ---- Probe sweep (Phase 3) ----
 # Qwen3-8B has 36 transformer blocks; sweep ~every 4th layer.
@@ -52,6 +62,7 @@ SEED = 0
 
 def get_device() -> str:
     """cuda on the GPU box; mps/cpu for local code-path checks."""
+    import torch  # lazy: keeps config importable on the Mac (no torch) for offline validation
     if torch.cuda.is_available():
         return "cuda"
     if torch.backends.mps.is_available():
