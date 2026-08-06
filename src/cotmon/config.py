@@ -59,6 +59,10 @@ GEN_MAX_NEW_TOKENS = 8192    # pilot: 4096 truncated ~29% of questions (0 valid 
 MAX_MODEL_LEN = 16384        # prompt + generation budget for the vLLM engine (KV-cache sizing)
 SEED = 0
 
+# Authoritative answer extraction (Phase 1): single-pass 'Final answer: (X)' + logprob check.
+ANSWER_LOGPROBS = 20         # top-k logprobs to request, to read the option-letter distribution
+ANSWER_CONF_MARGIN = 0.20    # flag a trace 'flaky' if P(top letter) - P(runner-up) < this
+
 
 def get_device() -> str:
     """cuda on the GPU box; mps/cpu for local code-path checks."""

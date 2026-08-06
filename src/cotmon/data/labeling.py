@@ -74,8 +74,11 @@ def label_traces(question_id, hint_family: str, h: str, a0_star: str,
             "hint_target": h,
             "baseline_answer": a0_star,
             "answer": s.answer,
+            "answer_text": s.answer_text,   # post-</think> text — audit trail for the parse
             "label": label,
             "cot_text": s.cot,
+            "conf_margin": s.conf_margin,    # answer-token logprob margin (small => flaky)
+            "flaky": s.flaky,
             "lift": lift,
             "flip_question": lift >= config.LIFT_THRESHOLD,
         }
