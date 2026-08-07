@@ -18,7 +18,10 @@
 #   curl -s -u "$LAMBDA_API_KEY:" https://cloud.lambdalabs.com/api/v1/instances
 #
 # MAX_HOURS caps runtime as a hang safety-net (default 3): even if the job wedges,
-# the box terminates after this long instead of billing all night.
+# the box terminates after this long instead of billing all night. Set MAX_HOURS=0
+# (or 'none') to DISABLE the cap and run until the job finishes on its own — the box
+# still self-terminates on completion, it just won't be killed early. (Trade-off: a
+# genuine hang would then bill indefinitely.)
 
 set -u
 : "${LAMBDA_API_KEY:?set LAMBDA_API_KEY (dashboard → API keys)}"
@@ -30,10 +33,16 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-echo "=== run start $(date -u) | cap ${MAX_HOURS}h | cmd: $* ==="
-# -k 30s: if the job ignores SIGTERM at the cap, force-kill 30s later.
-timeout -k 30s "${MAX_HOURS}h" "$@"
-code=$?
+if [ "$MAX_HOURS" = "0" ] || [ "$MAX_HOURS" = "none" ]; then
+  echo "=== run start $(date -u) | NO time cap (runs to completion) | cmd: $* ==="
+  "$@"
+  code=$?
+else
+  echo "=== run start $(date -u) | cap ${MAX_HOURS}h | cmd: $* ==="
+  # -k 30s: if the job ignores SIGTERM at the cap, force-kill 30s later.
+  timeout -k 30s "${MAX_HOURS}h" "$@"
+  code=$?
+fi
 echo "=== job exited code=$code at $(date -u) ==="
 
 echo "=== terminating instance $INSTANCE_ID ==="
