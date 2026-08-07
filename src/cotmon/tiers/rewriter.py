@@ -52,6 +52,7 @@ class Rewriter:
         sp = SamplingParams(
             n=1, temperature=config.REWRITE_TEMPERATURE, top_p=config.REWRITE_TOP_P,
             max_tokens=config.REWRITE_MAX_TOKENS, seed=config.SEED,
+            repetition_penalty=config.REWRITE_REPETITION_PENALTY,  # stop T3 symbolic loops
         )
         prompts: List[str] = []
         index: List[tuple] = []  # (trace_i, tier)

@@ -36,6 +36,7 @@ REWRITER_MODEL = "Qwen/Qwen2.5-14B-Instruct"  # SEPARATE family/gen from base(Qw
 REWRITE_TEMPERATURE = 0.3    # low -> faithful, consistent rewrites (not greedy: avoids loops)
 REWRITE_TOP_P = 0.9
 REWRITE_MAX_TOKENS = 8192    # T1 (clean prose) can approach input length; cap generously
+REWRITE_REPETITION_PENALTY = 1.3  # break T3 symbolic-compression loops ("F&G? F&G? ..." at low temp)
 
 # ---- Probe sweep (Phase 3) ----
 # Qwen3-8B has 36 transformer blocks; sweep ~every 4th layer.
