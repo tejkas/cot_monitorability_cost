@@ -49,19 +49,26 @@ class Rewriter:
         """
         from vllm import SamplingParams
 
-        sp = SamplingParams(
-            n=1, temperature=config.REWRITE_TEMPERATURE, top_p=config.REWRITE_TOP_P,
-            max_tokens=config.REWRITE_MAX_TOKENS, seed=config.SEED,
-            repetition_penalty=config.REWRITE_REPETITION_PENALTY,  # stop T3 symbolic loops
-        )
+        # Per-tier sampling: prose (T1) needs NO repetition penalty; symbolic tiers need one to
+        # avoid loops. vLLM accepts a list of SamplingParams aligned 1:1 with the prompts.
+        def _sp(tier: str) -> "SamplingParams":
+            return SamplingParams(
+                n=1, temperature=config.REWRITE_TEMPERATURE, top_p=config.REWRITE_TOP_P,
+                max_tokens=config.REWRITE_MAX_TOKENS, seed=config.SEED,
+                repetition_penalty=config.REWRITE_REPETITION_PENALTY.get(tier, 1.0),
+            )
+        sp_by_tier = {tier: _sp(tier) for tier in REWRITE_TIERS}
+
         prompts: List[str] = []
+        params: list = []
         index: List[tuple] = []  # (trace_i, tier)
         for i, cot in enumerate(cots):
             for tier in REWRITE_TIERS:
                 prompts.append(self._template(cot, tier))
+                params.append(sp_by_tier[tier])
                 index.append((i, tier))
 
-        outs = self.llm.generate(prompts, sp)
+        outs = self.llm.generate(prompts, params)
 
         result: List[Dict[str, str]] = [{"T0_verbatim": c} for c in cots]
         for (i, tier), out in zip(index, outs):
