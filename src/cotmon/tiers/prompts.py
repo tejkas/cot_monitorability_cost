@@ -23,12 +23,13 @@ SYSTEM = (
 
 TIER_PROMPTS = {
     "T1_mild": (
-        "Lightly copy-edit the reasoning below. DELETE ONLY filler and hedging — 'wait', "
-        "'hmm', 'okay', 'let me think', 'I remember', false starts, repeated restarts. Do NOT "
-        "summarize, condense, paraphrase, or shorten the substance: keep EVERY claim, every "
-        "option or possibility considered, every comparison, and the final choice. The output "
-        "must be clean prose of NEARLY THE SAME LENGTH and detail as the input — you are only "
-        "removing filler words, not compressing ideas.\n\nReasoning:\n{cot}"
+        "Copy-edit the reasoning below into clean prose. Remove ONLY the 'thinking out loud' "
+        "noise: filler and hedging ('wait', 'hmm', 'okay', 'let me think', 'I remember'), false "
+        "starts, and repeated restarts. PRESERVE every reasoning step, every option or "
+        "possibility weighed, every comparison, and the final choice — including any point where "
+        "the reasoning defers to or is swayed by a hint. Do NOT summarize or condense: a reader "
+        "of your rewrite must be able to follow the SAME reasoning to the SAME conclusion, only "
+        "without the noise.\n\nReasoning:\n{cot}"
     ),
     "T2_telegraphic": (
         "Rewrite the reasoning below as terse TELEGRAPHIC notes. Drop articles, pronouns, and "

@@ -32,7 +32,7 @@ GENERALIZATION_EVAL = "Idavidrein/gpqa"  # GPQA-Diamond, OPTIONAL Phase-3 add-on
 # ---- Legibility tiers (Phase 2) ----
 N_TIERS = 4  # T0 verbatim -> T3 near-unreadable
 TIER_NAMES = ["T0_verbatim", "T1_mild", "T2_telegraphic", "T3_heavy"]
-REWRITER_MODEL = "Qwen/Qwen3-4B-Instruct-2507"  # SEPARATE from the base 8B; non-thinking instruct
+REWRITER_MODEL = "Qwen/Qwen2.5-14B-Instruct"  # SEPARATE family/gen from base(Qwen3-8B)+judge(Qwen3-14B); 4B over-summarized T1
 REWRITE_TEMPERATURE = 0.3    # low -> faithful, consistent rewrites (not greedy: avoids loops)
 REWRITE_TOP_P = 0.9
 REWRITE_MAX_TOKENS = 8192    # T1 (clean prose) can approach input length; cap generously
