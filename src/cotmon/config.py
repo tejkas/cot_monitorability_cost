@@ -47,6 +47,15 @@ REWRITE_REPETITION_PENALTY = {   # PER-TIER: prose repeats function words, symbo
 PROBE_LAYERS = list(range(4, 36, 4))  # [4, 8, 12, 16, 20, 24, 28, 32]
 PROBE_POOLINGS = ["mean", "max", "last", "softmax", "attention"]  # McKenzie et al. Table 3
 
+# Phase 3 probe / sweep params
+PROBE_KIND = "diff_of_means"       # primary probe; "logreg" is the alternative
+PROBE_TEST_FRACTION = 0.3          # held-out fraction
+PROBE_SPLIT_BY = "question_id"     # split by QUESTION, not trace — same-question traces would leak
+PROBE_SPLIT_SEED = 0
+PROBE_TRAIN_TIER = "T0_verbatim"   # train the probe on this tier, then eval across ALL tiers (knob)
+ACT_DTYPE = "float16"              # cache activations as fp16 (halves disk)
+FAITH_MAX_GAP = 0.10               # faithfulness gate: recovery(T0) - recovery(T1) above this = unfaithful
+
 # ---- Phase 1: hint-usage data generation ----
 # Labeling scheme derived in DESIGN.md §4. Pilot defaults; tune after the first run.
 N_QUESTIONS = 300            # candidate questions to screen (pilot size)

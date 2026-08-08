@@ -33,30 +33,47 @@ def main() -> None:
     ap.add_argument("--out", default=str(config.DATA_DIR / "traces" / "phase2_tiers.jsonl"))
     ap.add_argument("--model", default=config.REWRITER_MODEL)
     ap.add_argument("--limit", type=int, default=0, help="rewrite only the first N traces (0 = all)")
+    ap.add_argument("--chunk-size", type=int, default=100,
+                    help="traces per checkpoint — output is flushed after each chunk")
+    ap.add_argument("--fresh", action="store_true", help="ignore/overwrite any existing output")
     args = ap.parse_args()
 
     traces = [json.loads(l) for l in open(args.in_path)]
     if args.limit:
         traces = traces[:args.limit]
-    cots = [t["cot_text"] for t in traces]
-    print(f"[phase2] rewriting {len(cots)} traces x {len(rw.REWRITE_TIERS)} tiers with {args.model}")
 
-    R = rw.Rewriter(model=args.model)
-    tier_sets = R.rewrite(cots)  # list of {tier_name: text}
-
-    # --- write the tiered dataset (carry the label + provenance through) ---
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if args.fresh and out_path.exists():
+        out_path.unlink()
+
+    # --- resume: output is written in input order, so skip the traces already done. A kill
+    #     happens during generate() (before a chunk's rows are written+flushed), so the file
+    #     always ends on a complete chunk -> a line count is a safe resume point. ---
+    n_done = sum(1 for _ in open(out_path)) if out_path.exists() else 0
+    n_done = min(n_done, len(traces))
+    remaining = traces[n_done:]
+    print(f"[phase2] {len(traces)} traces | {n_done} already done | {len(remaining)} to go "
+          f"| x{len(rw.REWRITE_TIERS)} tiers | {args.model}")
+
     carry = ["question_id", "hint_family", "hint_target", "baseline_answer",
              "answer", "label", "lift", "flip_question"]
-    with out_path.open("w") as f:
-        for t, tiers in zip(traces, tier_sets):
-            row = {k: t.get(k) for k in carry}
-            row["tiers"] = tiers
-            f.write(json.dumps(row) + "\n")
-    print(f"[phase2] wrote {out_path}  ({len(tier_sets)} rows)")
 
-    # --- validation: per-tier metric means + monotonicity verdict ---
+    if remaining:
+        R = rw.Rewriter(model=args.model)
+        with out_path.open("a") as f:  # APPEND — checkpoint after every chunk
+            for start in range(0, len(remaining), args.chunk_size):
+                batch = remaining[start:start + args.chunk_size]
+                for t, tiers in zip(batch, R.rewrite([t["cot_text"] for t in batch])):
+                    row = {k: t.get(k) for k in carry}
+                    row["tiers"] = tiers
+                    f.write(json.dumps(row) + "\n")
+                f.flush()
+                print(f"[phase2] checkpoint: {n_done + start + len(batch)}/{len(traces)} written")
+    print(f"[phase2] wrote {out_path}")
+
+    # --- validation: reload the FULL output, per-tier metric means + monotonicity verdict ---
+    tier_sets = [json.loads(l)["tiers"] for l in open(out_path)]
     summary = val.summarize(tier_sets)
     res_path = config.RESULTS_DIR / "phase2_tier_validation.json"
     res_path.parent.mkdir(parents=True, exist_ok=True)
