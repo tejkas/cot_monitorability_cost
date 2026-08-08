@@ -1,38 +1,77 @@
 """Residual-stream activation extraction via HF Transformers (Phase 3).
 
 Re-encode each tier's TEXT through the base model with `output_hidden_states=True`, then pool
-over tokens -> one vector per (example, layer, pooling). This produces the RE-ENCODE probe
-input (DESIGN §6): the SAME tier-k text the text monitor reads, but read as activations.
+over tokens -> one vector per (example, layer, pooling). This is the RE-ENCODE probe input
+(DESIGN §6): the SAME tier-k text the text monitor reads, read as activations instead of tokens.
 
 Done in HF Transformers, NOT vLLM, on purpose: vLLM hides per-token hidden states behind its
-paged-attention kernels, and forcing them out during decode is exactly the cost the Phase-5
-serving study measures. Here (offline, prefill-only re-encoding) HF is the clean tool.
+paged-attention kernels; forcing them out during decode is exactly the cost the Phase-5 serving
+study measures. Here (offline, prefill-only) HF is the clean tool.
 
-Activations are large — cache to config.ACTIVATIONS_DIR as fp16, per (tier, pooling):
-    X[tier][pooling] : np.ndarray [n_examples, n_layers, hidden_dim]
-    plus aligned labels [n] and question_ids [n] for a leakage-safe split.
+Output of extract(): {pooling: np.ndarray[n_texts, n_layers, hidden]}, where the j-th layer
+slice corresponds to config.PROBE_LAYERS[j]. The pad-aware attention mask is passed to each
+pooler so padding tokens never contribute.
 
---- the extraction internals (residual stream, output_hidden_states, HF-vs-vLLM) are covered
-    in education mode; this file fixes the interface + caching plumbing. ---
+torch/transformers are imported lazily so this module imports on a laptop for syntax checks.
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+import numpy as np
 
 from .. import config
+from .pooling import pool
 
 
 class ActivationExtractor:
-    """Loads the base model in HF with hidden-state output enabled; re-encodes + pools text."""
+    """Loads the base model in HF with hidden-state output; re-encodes + pools text batches."""
 
-    def __init__(self, model: str = config.BASE_MODEL,
-                 layers: List[int] = None, poolings: List[str] = None):
-        self.model_name = model
+    def __init__(self, model: str = config.BASE_MODEL, layers: Optional[List[int]] = None,
+                 poolings: Optional[List[str]] = None,
+                 batch_size: int = config.EXTRACT_BATCH_SIZE,
+                 max_len: int = config.EXTRACT_MAX_LEN):
+        import torch  # lazy
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.torch = torch
         self.layers = layers or config.PROBE_LAYERS
         self.poolings = poolings or config.PROBE_POOLINGS
-        raise NotImplementedError("education mode (HF load + output_hidden_states)")
+        self.batch_size = batch_size
+        self.max_len = max_len
 
-    def extract(self, texts: List[str]) -> Dict[str, "object"]:
-        """Re-encode `texts`, pool per layer x pooling.
+        self.tok = AutoTokenizer.from_pretrained(model)
+        if self.tok.pad_token is None:
+            self.tok.pad_token = self.tok.eos_token
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model, torch_dtype=torch.float16, output_hidden_states=True,
+        ).to(self.device).eval()
+        self.hidden = self.model.config.hidden_size
 
-        Returns {pooling: array[n_texts, n_layers, hidden_dim]} (n_layers == len(self.layers)).
-        """
-        raise NotImplementedError("education mode (forward pass + pooling)")
+    def extract(self, texts: List[str]) -> Dict[str, np.ndarray]:
+        """Re-encode `texts`; return {pooling: [n_texts, n_layers, hidden]} (float32)."""
+        torch = self.torch
+        n = len(texts)
+        out = {p: np.empty((n, len(self.layers), self.hidden), dtype=np.float32)
+               for p in self.poolings}
+
+        for start in range(0, n, self.batch_size):
+            batch = texts[start:start + self.batch_size]
+            enc = self.tok(batch, return_tensors="pt", padding=True,
+                           truncation=True, max_length=self.max_len).to(self.device)
+            with torch.no_grad():
+                hs = self.model(**enc).hidden_states  # tuple (n_layers+1) of [B, S, hidden]
+
+            masks = enc["attention_mask"].bool().cpu().numpy()          # [B, S]
+            # Pull only the layers we need to host memory once (hs[0] = embeddings, hs[L] = block L).
+            layer_arrs = [hs[L].float().cpu().numpy() for L in self.layers]  # each [B, S, hidden]
+
+            for bi in range(len(batch)):
+                m = masks[bi]  # [S] bool — real vs pad tokens
+                for p in self.poolings:
+                    for j in range(len(self.layers)):
+                        out[p][start + bi, j] = pool(layer_arrs[j][bi], p, mask=m)
+
+            del hs, layer_arrs
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+        return out

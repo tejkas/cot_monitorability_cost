@@ -45,7 +45,7 @@ REWRITE_REPETITION_PENALTY = {   # PER-TIER: prose repeats function words, symbo
 # ---- Probe sweep (Phase 3) ----
 # Qwen3-8B has 36 transformer blocks; sweep ~every 4th layer.
 PROBE_LAYERS = list(range(4, 36, 4))  # [4, 8, 12, 16, 20, 24, 28, 32]
-PROBE_POOLINGS = ["mean", "max", "last", "softmax", "attention"]  # McKenzie et al. Table 3
+PROBE_POOLINGS = ["mean", "max", "last", "softmax"]  # McKenzie et al. Table 3
 
 # Phase 3 probe / sweep params
 PROBE_KIND = "diff_of_means"       # primary probe; "logreg" is the alternative
@@ -55,6 +55,8 @@ PROBE_SPLIT_SEED = 0
 PROBE_TRAIN_TIER = "T0_verbatim"   # train the probe on this tier, then eval across ALL tiers (knob)
 ACT_DTYPE = "float16"              # cache activations as fp16 (halves disk)
 FAITH_MAX_GAP = 0.10               # faithfulness gate: recovery(T0) - recovery(T1) above this = unfaithful
+EXTRACT_BATCH_SIZE = 8            # re-encode batch (reduce if the 40GB card OOMs on long T0)
+EXTRACT_MAX_LEN = 4096           # truncate re-encoded tier text to this many tokens
 
 # ---- Phase 1: hint-usage data generation ----
 # Labeling scheme derived in DESIGN.md §4. Pilot defaults; tune after the first run.
