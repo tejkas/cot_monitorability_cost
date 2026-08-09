@@ -30,7 +30,7 @@ class ActivationExtractor:
                  batch_size: int = config.EXTRACT_BATCH_SIZE,
                  max_len: int = config.EXTRACT_MAX_LEN):
         import torch  # lazy
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModel, AutoTokenizer
 
         self.torch = torch
         self.layers = layers or config.PROBE_LAYERS
@@ -42,7 +42,10 @@ class ActivationExtractor:
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.model = AutoModelForCausalLM.from_pretrained(
+        # AutoModel, NOT AutoModelForCausalLM: the backbone has no lm_head, so it never computes
+        # the [B, S, vocab] logits (~9 GiB at batch 8 / seq 4k) we'd only throw away. We want
+        # hidden states, not predictions.
+        self.model = AutoModel.from_pretrained(
             model, torch_dtype=torch.float16, output_hidden_states=True,
         ).to(self.device).eval()
         self.hidden = self.model.config.hidden_size
