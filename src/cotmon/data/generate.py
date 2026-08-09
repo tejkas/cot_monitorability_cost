@@ -152,14 +152,20 @@ class Generator:
             tokenize=False, add_generation_prompt=True, enable_thinking=True,
         )
 
-    def sample(self, user_turns: List[str], k: int,
-               n_options_list: List[int]) -> List[List[Sample]]:
-        """For each user turn, return k parsed Samples. Batched across all turns."""
+    def sample(self, user_turns: List[str], k: int, n_options_list: List[int],
+               temperature: Optional[float] = None) -> List[List[Sample]]:
+        """For each user turn, return k parsed Samples. Batched across all turns.
+
+        temperature overrides config.GEN_TEMPERATURE — Phase 4 genuine generation uses a LOWER
+        temp so the LoRA's compressed T3 style survives sampling (at 0.6 the base verbose prior
+        wins; at greedy the LoRA style is perfect).
+        """
         from vllm import SamplingParams
 
         sp = SamplingParams(
-            n=k, temperature=config.GEN_TEMPERATURE, top_p=config.GEN_TOP_P,
-            top_k=config.GEN_TOP_K, max_tokens=config.GEN_MAX_NEW_TOKENS, seed=config.SEED,
+            n=k, temperature=config.GEN_TEMPERATURE if temperature is None else temperature,
+            top_p=config.GEN_TOP_P, top_k=config.GEN_TOP_K,
+            max_tokens=config.GEN_MAX_NEW_TOKENS, seed=config.SEED,
             logprobs=config.ANSWER_LOGPROBS,  # top-k at each token -> read the answer letter's margin
         )
         prompts = [self._template(u) for u in user_turns]

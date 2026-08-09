@@ -50,6 +50,8 @@ def main() -> None:
                     default=str(config.DATA_DIR / "traces" / "phase2_tiers.jsonl"))
     ap.add_argument("--out", default=str(config.DATA_DIR / "traces" / "genuine_traces.jsonl"))
     ap.add_argument("--limit", type=int, default=0, help="cap unique (q,hint) items for a smoke run")
+    ap.add_argument("--temp", type=float, default=0.3,
+                    help="generation temperature; low keeps the LoRA's T3 style (0.6 washes it out)")
     args = ap.parse_args()
 
     # Held-out items only: same question-level split the probe uses, so the LoRA never saw them.
@@ -83,7 +85,8 @@ def main() -> None:
         jobs.append((r, q))
 
     G = gen.Generator(model=config.BASE_MODEL, lora=args.lora)
-    samples = G.sample(turns, args.k, nopts)
+    print(f"[phase4c] generating at temperature={args.temp} (low -> preserves the LoRA T3 style)")
+    samples = G.sample(turns, args.k, nopts, temperature=args.temp)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
