@@ -18,6 +18,9 @@ class DiffOfMeansProbe:
     """Direction = class-mean difference; decision score = projection onto it."""
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "DiffOfMeansProbe":
+        # Activations are cached as fp16; summing ~thousands of rows in a float16 accumulator
+        # overflows its +-65504 range -> inf/NaN. Upcast to float32 before any reduction.
+        X = np.asarray(X, dtype=np.float32)
         self.mu = X.mean(axis=0)
         self.sigma = X.std(axis=0) + 1e-6
         # standardize to z-scores
@@ -26,7 +29,7 @@ class DiffOfMeansProbe:
         return self
 
     def decision_scores(self, X: np.ndarray) -> np.ndarray:
-        Xs = (X - self.mu) / self.sigma
+        Xs = (np.asarray(X, dtype=np.float32) - self.mu) / self.sigma
         return Xs @ self.w
 
 def auroc(y: np.ndarray, s: np.ndarray) -> float:
