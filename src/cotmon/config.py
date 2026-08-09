@@ -55,8 +55,22 @@ PROBE_SPLIT_SEED = 0
 PROBE_TRAIN_TIER = "T0_verbatim"   # train the probe on this tier, then eval across ALL tiers (knob)
 ACT_DTYPE = "float16"              # cache activations as fp16 (halves disk)
 FAITH_MAX_GAP = 0.10               # faithfulness gate: recovery(T0) - recovery(T1) above this = unfaithful
-EXTRACT_BATCH_SIZE = 8            # re-encode batch (reduce if the 40GB card OOMs on long T0)
-EXTRACT_MAX_LEN = 4096           # truncate re-encoded tier text to this many tokens
+EXTRACT_BATCH_SIZE = 8            # re-encode batch (reduce if the card OOMs on long T0)
+EXTRACT_MAX_LEN = 8192           # H100/80GB: covers every CoT (gen capped at 8192) -> NO truncation.
+                                 # (was 4096 on the 40GB A100, which clipped the long-trace tail.)
+
+# ---- Phase 4: genuine LoRA (fine-tune the base model to reason in T3 style) ----
+LORA_TRAIN_TIER = "T3_heavy"     # which tier's rewrites the LoRA imitates (the illegible target)
+LORA_R = 16                      # adapter rank (capacity of the low-rank update)
+LORA_ALPHA = 32                  # scaling: effective update is (alpha/r)*B@A
+LORA_DROPOUT = 0.05
+LORA_TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj",   # attention +
+                       "gate_proj", "up_proj", "down_proj"]      # MLP -> thorough style adaptation
+LORA_EPOCHS = 2
+LORA_BATCH = 4                   # H100/80GB fits this comfortably w/ grad-checkpointing (was 1 on A100)
+LORA_GRAD_ACCUM = 4             # effective batch = LORA_BATCH * LORA_GRAD_ACCUM = 16 (unchanged)
+LORA_LR = 2e-4
+LORA_OUT = "lora_t3"            # adapter dir under RESULTS_DIR
 
 # ---- Phase 1: hint-usage data generation ----
 # Labeling scheme derived in DESIGN.md §4. Pilot defaults; tune after the first run.

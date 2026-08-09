@@ -137,12 +137,14 @@ class Generator:
     """Thin wrapper over vLLM offline generation with Qwen3 thinking enabled."""
 
     def __init__(self, model: str = config.BASE_MODEL, max_model_len: int = config.MAX_MODEL_LEN,
-                 gpu_mem_util: float = 0.90):
+                 gpu_mem_util: float = 0.90, lora: Optional[str] = None):
         from vllm import LLM  # lazy import
 
         self.tok = AutoTokenizer.from_pretrained(model)
+        self.lora = lora  # path to a LoRA adapter (Phase 4 genuine generation), or None for base
+        kw = dict(enable_lora=True, max_lora_rank=config.LORA_R) if lora else {}
         self.llm = LLM(model=model, dtype="float16",
-                       gpu_memory_utilization=gpu_mem_util, max_model_len=max_model_len)
+                       gpu_memory_utilization=gpu_mem_util, max_model_len=max_model_len, **kw)
 
     def _template(self, user_turn: str) -> str:
         return self.tok.apply_chat_template(

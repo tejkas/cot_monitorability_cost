@@ -10,9 +10,9 @@ pandas
 scikit-learn
 matplotlib
 
-# LoRA fine-tuning (Phase 4) — uncomment when we get there
-# peft>=0.13
-# trl>=0.11
+# LoRA fine-tuning (Phase 4)
+peft>=0.13
+trl>=0.11
 
 # Offline generation (Phase 1) + serving benchmark (Phase 5) — pin exact version on the GPU box
 vllm>=0.18             # Phase 1: offline batched sampling; Phase 5: native extract_hidden_states

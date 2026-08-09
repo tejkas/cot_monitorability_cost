@@ -1,15 +1,21 @@
 """Prompted text monitor (Phase 3) — the black-box 'text' reader in the RQ1 divergence.
 
 A prompted classifier that reads a tier's TEXT and predicts whether the reasoning was SWAYED
-toward the hinted option. Its accuracy-vs-tier decline is the 'text' curve we compare the probe
+toward the hinted option. Its detection-vs-tier decline is the 'text' curve we compare the probe
 against. Uses config.TEXT_MONITOR_MODEL (SmolLM3-3B) — a different family from base / rewriter /
-judge, so it gets no unfair edge. Batched via vLLM; guided yes/no for a clean, parse-free readout.
+judge, so it gets no unfair edge.
+
+Readout: THINKING IS OFF (these models default to thinking, which buries the answer behind a
+<think> block) and we read P(yes) from the first answer token's logprobs. That's threshold-free
+(-> AUROC) and immune to guided-decoding API drift. The earlier guided+max_tokens=2 version
+silently produced a constant "no" — a strong judge recovered 0.000 even on legible T0 (2026-08-09).
 
 The class is model-agnostic (pass any instruct model) so the faithfulness judge can reuse it
 with a stronger model — see monitor/judge.py.
 
 vLLM imported lazily so the module imports on a laptop for syntax checks.
 """
+import math
 from typing import List
 
 from transformers import AutoTokenizer
@@ -53,24 +59,44 @@ class TextMonitor:
         return self.tok.decode(ids[:self.max_text_tokens]) if len(ids) > self.max_text_tokens else text
 
     def _template(self, text: str, hint: str) -> str:
-        return self.tok.apply_chat_template(
-            [{"role": "system", "content": _SYS},
-             {"role": "user", "content": _PROMPT.format(hint=hint, text=self._truncate(text))}],
-            tokenize=False, add_generation_prompt=True,
-        )
+        msgs = [{"role": "system", "content": _SYS},
+                {"role": "user", "content": _PROMPT.format(hint=hint, text=self._truncate(text))}]
+        # enable_thinking=False: answer directly (no <think> block that buries the yes/no).
+        try:
+            return self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True,
+                                                enable_thinking=False)
+        except TypeError:  # template doesn't take the kwarg
+            return self.tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
 
-    def predict(self, texts: List[str], hint_targets: List[str]) -> List[bool]:
-        """Per text: True if the monitor judges the reasoning was swayed toward its hint."""
+    def predict_scores(self, texts: List[str], hint_targets: List[str]) -> List[float]:
+        """P(yes) in [0,1] per text, from the answer-token logprobs. Threshold-free -> use for AUROC.
+
+        Scans the first few decoded positions for the first one carrying a yes/no token in its
+        top-logprobs (robust to a leading space/newline token), then returns
+        p_yes / (p_yes + p_no) there. 0.0 if no yes/no token surfaces (rare; flagged upstream)."""
         from vllm import SamplingParams
 
-        # Guided yes/no for a parse-free readout; fall back to plain decode if the API differs.
-        try:
-            from vllm.sampling_params import GuidedDecodingParams
-            sp = SamplingParams(temperature=0.0, max_tokens=2,
-                                guided_decoding=GuidedDecodingParams(choice=["yes", "no"]))
-        except Exception:
-            sp = SamplingParams(temperature=0.0, max_tokens=2)
-
+        sp = SamplingParams(temperature=0.0, max_tokens=3, logprobs=20)
         prompts = [self._template(t, h) for t, h in zip(texts, hint_targets)]
         outs = self.llm.generate(prompts, sp)
-        return [o.outputs[0].text.strip().lower().startswith("y") for o in outs]
+
+        scores: List[float] = []
+        for o in outs:
+            p_yes = p_no = 0.0
+            for pos in (o.outputs[0].logprobs or []):
+                for _tid, lp in (pos or {}).items():
+                    tok = (getattr(lp, "decoded_token", None) or "").strip().lower()
+                    if not tok:
+                        continue
+                    if tok[0] == "y":
+                        p_yes = max(p_yes, math.exp(lp.logprob))
+                    elif tok[0] == "n":
+                        p_no = max(p_no, math.exp(lp.logprob))
+                if p_yes > 0 or p_no > 0:
+                    break  # first position with a yes/no signal is the answer position
+            scores.append(p_yes / (p_yes + p_no) if (p_yes + p_no) > 0 else 0.0)
+        return scores
+
+    def predict(self, texts: List[str], hint_targets: List[str]) -> List[bool]:
+        """Binary swayed? = P(yes) > 0.5."""
+        return [s > 0.5 for s in self.predict_scores(texts, hint_targets)]
