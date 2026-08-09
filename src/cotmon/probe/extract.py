@@ -14,6 +14,7 @@ pooler so padding tokens never contribute.
 
 torch/transformers are imported lazily so this module imports on a laptop for syntax checks.
 """
+import time
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -57,7 +58,11 @@ class ActivationExtractor:
         out = {p: np.empty((n, len(self.layers), self.hidden), dtype=np.float32)
                for p in self.poolings}
 
-        for start in range(0, n, self.batch_size):
+        n_batches = (n + self.batch_size - 1) // self.batch_size
+        print(f"[extract] {n} texts on {self.device} -> {n_batches} batches of {self.batch_size}",
+              flush=True)  # flush: stdout is buffered under nohup/redirect; without this you go blind
+        t0 = time.time()
+        for bidx, start in enumerate(range(0, n, self.batch_size)):
             batch = texts[start:start + self.batch_size]
             enc = self.tok(batch, return_tensors="pt", padding=True,
                            truncation=True, max_length=self.max_len).to(self.device)
@@ -70,6 +75,10 @@ class ActivationExtractor:
 
             for bi in range(len(batch)):
                 m = masks[bi]  # [S] bool — real vs pad tokens
+                if not m.any():
+                    # empty/blank text -> all-pad row; last_pool would IndexError. Fall back to the
+                    # whole row so we emit a (meaningless-but-finite) vector instead of crashing.
+                    m = np.ones_like(m)
                 for p in self.poolings:
                     for j in range(len(self.layers)):
                         out[p][start + bi, j] = pool(layer_arrs[j][bi], p, mask=m)
@@ -77,4 +86,12 @@ class ActivationExtractor:
             del hs, layer_arrs
             if self.device == "cuda":
                 torch.cuda.empty_cache()
+
+            if (bidx + 1) % 10 == 0 or bidx == n_batches - 1:
+                done = min(start + self.batch_size, n)
+                el = time.time() - t0
+                rate = done / el if el else 0.0
+                eta = (n - done) / rate / 60 if rate else 0.0
+                print(f"[extract] batch {bidx + 1}/{n_batches}  ({done}/{n} texts, "
+                      f"{rate:.1f} txt/s, ETA {eta:.1f} min)", flush=True)
         return out

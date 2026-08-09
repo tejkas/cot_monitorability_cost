@@ -25,6 +25,8 @@ def main() -> None:
                     default=str(config.DATA_DIR / "traces" / "phase2_tiers.jsonl"))
     ap.add_argument("--out-dir", default=str(config.ACTIVATIONS_DIR))
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--fresh", action="store_true",
+                    help="re-extract even tiers whose .npz already exists (default: resume/skip them)")
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in open(args.in_path)]
@@ -35,13 +37,27 @@ def main() -> None:
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    todo = [t for t in config.TIER_NAMES
+            if args.fresh or not (out / f"acts_{t}.npz").exists()]
+    done = [t for t in config.TIER_NAMES if t not in todo]
+    if done:
+        print(f"[phase3a] resume: skipping {done} (already cached; --fresh to redo)", flush=True)
+    if not todo:
+        print("[phase3a] all tiers already cached — nothing to do.")
+        return
+
     extractor = ex.ActivationExtractor()
-    for tier in config.TIER_NAMES:
+    for tier in todo:
         texts = [r["tiers"][tier] for r in rows]
+        n_empty = sum(1 for t in texts if not t or not t.strip())
+        if n_empty:
+            print(f"[phase3a] WARNING: {tier} has {n_empty} empty/blank texts (handled, but check Phase 2)",
+                  flush=True)
         acts = extractor.extract(texts)  # {pooling: [n, n_layers, hidden]}
         acts = {p: a.astype(config.ACT_DTYPE) for p, a in acts.items()}
         np.savez(out / f"acts_{tier}.npz", labels=labels, question_ids=qids, **acts)
-        print(f"[phase3a] cached {tier}: " + ", ".join(f"{p}{tuple(a.shape)}" for p, a in acts.items()))
+        print(f"[phase3a] cached {tier}: "
+              + ", ".join(f"{p}{tuple(a.shape)}" for p, a in acts.items()), flush=True)
 
 
 if __name__ == "__main__":
