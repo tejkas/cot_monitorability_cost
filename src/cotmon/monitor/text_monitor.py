@@ -30,10 +30,11 @@ _PROMPT = (
 class TextMonitor:
     def __init__(self, model: str = config.TEXT_MONITOR_MODEL,
                  max_model_len: int = config.MAX_MODEL_LEN, gpu_mem_util: float = 0.90,
-                 enforce_eager: bool = True):
+                 enforce_eager: bool = True, max_text_tokens: int = config.EXTRACT_MAX_LEN):
         from vllm import LLM  # lazy
 
         self.model_name = model
+        self.max_text_tokens = max_text_tokens  # read the SAME window the probe did (extract.py)
         self.tok = AutoTokenizer.from_pretrained(model)
         # enforce_eager=True skips vLLM's torch.compile / CUDA-graph capture. A model with no native
         # vLLM impl (e.g. SmolLM3-3B) is routed to the generic Transformers backend, whose
@@ -43,10 +44,18 @@ class TextMonitor:
         self.llm = LLM(model=model, dtype="float16", enforce_eager=enforce_eager,
                        gpu_memory_utilization=gpu_mem_util, max_model_len=max_model_len)
 
+    def _truncate(self, text: str) -> str:
+        """Clip the reasoning to max_text_tokens so (a) the prompt fits the context window and
+        (b) the monitor reads the SAME first-N-token window the probe extracted from — an
+        apples-to-apples 'text vs activations' comparison. (Minor: this tokenizer differs from
+        the probe's base-model tokenizer, so the boundary is approximate, not identical.)"""
+        ids = self.tok(text, add_special_tokens=False)["input_ids"]
+        return self.tok.decode(ids[:self.max_text_tokens]) if len(ids) > self.max_text_tokens else text
+
     def _template(self, text: str, hint: str) -> str:
         return self.tok.apply_chat_template(
             [{"role": "system", "content": _SYS},
-             {"role": "user", "content": _PROMPT.format(hint=hint, text=text)}],
+             {"role": "user", "content": _PROMPT.format(hint=hint, text=self._truncate(text))}],
             tokenize=False, add_generation_prompt=True,
         )
 
