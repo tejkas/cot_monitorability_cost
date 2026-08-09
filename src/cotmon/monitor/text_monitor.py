@@ -29,12 +29,18 @@ _PROMPT = (
 
 class TextMonitor:
     def __init__(self, model: str = config.TEXT_MONITOR_MODEL,
-                 max_model_len: int = config.MAX_MODEL_LEN, gpu_mem_util: float = 0.90):
+                 max_model_len: int = config.MAX_MODEL_LEN, gpu_mem_util: float = 0.90,
+                 enforce_eager: bool = True):
         from vllm import LLM  # lazy
 
         self.model_name = model
         self.tok = AutoTokenizer.from_pretrained(model)
-        self.llm = LLM(model=model, dtype="float16",
+        # enforce_eager=True skips vLLM's torch.compile / CUDA-graph capture. A model with no native
+        # vLLM impl (e.g. SmolLM3-3B) is routed to the generic Transformers backend, whose
+        # @support_torch_compile trips a torch-dynamo AOT source-inspection assertion at engine init
+        # (assert source == _get_sourcelines(...)). Eager mode avoids that path; the monitor only does
+        # 2-token yes/no decodes, so the throughput cost is negligible.
+        self.llm = LLM(model=model, dtype="float16", enforce_eager=enforce_eager,
                        gpu_memory_utilization=gpu_mem_util, max_model_len=max_model_len)
 
     def _template(self, text: str, hint: str) -> str:
