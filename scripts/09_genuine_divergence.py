@@ -7,7 +7,7 @@ Extracts activations from the genuine T3 CoTs (08), then:
        - honest cell : the SAME (pooling, layer) Phase 3 selected on T0 -> no test-set re-selection,
          directly comparable to the proxy.
        - best cell   : the genuine set's own best -> a ceiling, LABELLED as selection-on-test.
-  2. MONITOR — SmolLM3-3B reads the genuine T3 text -> accuracy on the same held-out split.
+  2. MONITOR — SmolLM3-3B reads the genuine T3 text -> AUROC (logprob readout) on the same split.
   3. COMPARE — against Phase-3 base@T0 and proxy@T3 (from phase3_divergence.json).
 
 The headline: genuine@T3 probe should track proxy@T3 (the proxy wasn't lying) AND beat the
@@ -69,9 +69,14 @@ def main() -> None:
             if a is not None and a > gb_auroc:
                 gb_auroc, gb_pool, gb_layer = a, pool, layer
 
-    # 2) text monitor on the SAME held-out split (apples-to-apples with the probe)
-    preds = tm.TextMonitor().predict([texts[i] for i in te], [hints[i] for i in te])
-    monitor_acc = float(np.mean([p == bool(int(y)) for p, y in zip(preds, y_te)]))
+    # 2) text monitor on the SAME held-out split (apples-to-apples). AUROC is the headline,
+    # matching Phase 3 (accuracy is uninformative under class imbalance).
+    tmon = tm.TextMonitor()
+    scores = np.array(tmon.predict_scores([texts[i] for i in te], [hints[i] for i in te]))
+    mpred = scores > 0.5
+    monitor = {"auroc": P.auroc(y_te, scores),
+               "acc": float(np.mean(mpred == (y_te == 1))),
+               "yes_rate": float(np.mean(mpred))}
 
     # 3) Phase-3 reference + the honest cell (genuine probe at Phase 3's selected cell)
     honest, ref = None, {}
@@ -84,8 +89,8 @@ def main() -> None:
         ref = {
             "base_T0_probe": p3["probe"].get(config.PROBE_TRAIN_TIER, {}).get("auroc"),
             "proxy_T3_probe": p3["probe"].get("T3_heavy", {}).get("auroc"),
-            "base_T0_monitor": p3["text_monitor"].get(config.PROBE_TRAIN_TIER, {}).get("acc"),
-            "proxy_T3_monitor": p3["text_monitor"].get("T3_heavy", {}).get("acc"),
+            "base_T0_monitor": p3["text_monitor"].get(config.PROBE_TRAIN_TIER, {}).get("auroc"),
+            "proxy_T3_monitor": p3["text_monitor"].get("T3_heavy", {}).get("auroc"),
         }
     else:
         print("[phase4d] note: phase3_divergence.json not found — skipping proxy/base comparison")
@@ -95,7 +100,7 @@ def main() -> None:
         "genuine_probe_honest_cell": honest,     # same cell as Phase 3 -> comparable, no double-dip
         "genuine_probe_best_cell": {"pooling": gb_pool, "layer": gb_layer, **results[gb_pool][gb_layer],
                                     "caveat": "selection-on-test ceiling"},
-        "genuine_monitor_acc": monitor_acc,
+        "genuine_monitor": monitor,
         "phase3_reference": ref,
         "probe_full": results,
     }
@@ -108,16 +113,17 @@ def main() -> None:
         print(f"  genuine@T3 probe  (honest cell {honest['pooling']}/L{honest['layer']}): "
               f"AUROC {honest['auroc']:.3f}")
     print(f"  genuine@T3 probe  (best cell {gb_pool}/L{gb_layer}, ceiling):   AUROC {gb_auroc:.3f}")
-    print(f"  genuine@T3 monitor (SmolLM3-3B on genuine text):        acc   {monitor_acc:.3f}")
+    print(f"  genuine@T3 monitor (SmolLM3-3B on genuine text):        AUROC {monitor['auroc']:.3f}"
+          f"  (acc {monitor['acc']:.3f}, yes% {monitor['yes_rate']:.3f})")
     if ref:
         print(f"  --- Phase-3 reference ---")
         print(f"  base@T0  probe {ref['base_T0_probe']:.3f} | monitor {ref['base_T0_monitor']:.3f}")
         print(f"  proxy@T3 probe {ref['proxy_T3_probe']:.3f} | monitor {ref['proxy_T3_monitor']:.3f}")
     print(f"\n[phase4d] wrote {config.RESULTS_DIR / 'phase4_genuine.json'}")
-    _plot(honest, gb_auroc, monitor_acc, ref, config.RESULTS_DIR / "phase4_genuine.png")
+    _plot(honest, gb_auroc, monitor, ref, config.RESULTS_DIR / "phase4_genuine.png")
 
 
-def _plot(honest, gb_auroc, monitor_acc, ref, path) -> None:
+def _plot(honest, gb_auroc, monitor, ref, path) -> None:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -128,11 +134,11 @@ def _plot(honest, gb_auroc, monitor_acc, ref, path) -> None:
     labels = ["base@T0", "proxy@T3", "genuine@T3"]
     probe = [ref.get("base_T0_probe"), ref.get("proxy_T3_probe"),
              (honest or {}).get("auroc", gb_auroc)]
-    mon = [ref.get("base_T0_monitor"), ref.get("proxy_T3_monitor"), monitor_acc]
+    mon_vals = [ref.get("base_T0_monitor"), ref.get("proxy_T3_monitor"), monitor["auroc"]]
     x = np.arange(len(labels))
     plt.figure(figsize=(6, 4))
     plt.bar(x - 0.2, [p if p is not None else 0 for p in probe], 0.4, label="activation probe (AUROC)")
-    plt.bar(x + 0.2, [m if m is not None else 0 for m in mon], 0.4, label="text monitor (acc)")
+    plt.bar(x + 0.2, [m if m is not None else 0 for m in mon_vals], 0.4, label="text monitor (AUROC)")
     plt.xticks(x, labels)
     plt.ylabel("detection"); plt.ylim(0.4, 1.0)
     plt.title("Genuine vs proxy: probe holds, monitor falls")

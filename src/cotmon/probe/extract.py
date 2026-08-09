@@ -59,7 +59,8 @@ class ActivationExtractor:
                for p in self.poolings}
 
         n_batches = (n + self.batch_size - 1) // self.batch_size
-        print(f"[extract] {n} texts on {self.device} -> {n_batches} batches of {self.batch_size}",
+        print(f"[extract] {n} texts on {self.device} -> {n_batches} batches of {self.batch_size} "
+              f"(max_len={self.max_len})",  # log the truncation window so it's never ambiguous
               flush=True)  # flush: stdout is buffered under nohup/redirect; without this you go blind
         t0 = time.time()
         for bidx, start in enumerate(range(0, n, self.batch_size)):
