@@ -18,7 +18,7 @@
 # the vLLM-first order that avoids the torch pin conflict, and verifies GPU/torch/vllm.
 
 _cotmon_setup() {
-  local src repo_root fresh=0 fs="" a
+  local src repo_root fresh=0 fs="" a pymod
   src="${BASH_SOURCE[0]:-$0}"
   repo_root="$(cd "$(dirname "$src")/.." && pwd)"
 
@@ -36,6 +36,15 @@ _cotmon_setup() {
 
   echo "[setup] repo:        $repo_root"
   echo "[setup] filesystem:  $fs"
+
+  # --- HPC: load a modern Python via Lmod if present (no-op on cloud boxes w/o `module`) ---
+  # vLLM >=0.18 needs Python >=3.10, but ICE's default python3 is 3.9. Set COTMON_PY_MODULE="" to skip.
+  pymod="${COTMON_PY_MODULE-python/3.11.9}"
+  if [ -n "$pymod" ] && type module >/dev/null 2>&1; then
+    module load "$pymod" 2>/dev/null \
+      && echo "[setup] module-loaded $pymod ($(python3 --version 2>&1))" \
+      || echo "[setup] note: could not load module '$pymod' (fine off-cluster)"
+  fi
 
   # --- HF cache on the persistent filesystem (download the model ONCE) ---
   export HF_HOME="$fs/hf"

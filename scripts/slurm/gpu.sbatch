@@ -28,6 +28,8 @@ export HF_HOME="$COTMON_FS/hf"
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-0}"
 export TOKENIZERS_PARALLELISM=false
 
+# load the same Python module the venv was built against (Lmod present on ICE nodes)
+if type module >/dev/null 2>&1; then module load "${COTMON_PY_MODULE:-python/3.11.9}" 2>/dev/null || true; fi
 source .venv/bin/activate    # built once via: source scripts/setup_box.sh "$COTMON_FS"
 
 echo "[slurm] node=$(hostname)  job=${SLURM_JOB_ID:-?}  gpus=${CUDA_VISIBLE_DEVICES:-?}"
