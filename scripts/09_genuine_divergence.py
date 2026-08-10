@@ -64,6 +64,8 @@ def main() -> None:
 
     tr, te = sweep.question_split(qids, config.PROBE_TEST_FRACTION, config.PROBE_SPLIT_SEED)
     y_tr, y_te = labels[tr], labels[te]
+    print(f"[phase4d] within-genuine split: train n={len(tr)} (pos={int(y_tr.sum())}), "
+          f"test n={len(te)} (pos={int(y_te.sum())})  <- few positives => noisy AUROC")
 
     results: dict = {}  # results[pooling][layer] = {'auroc', 'acc'}
     for pool in config.PROBE_POOLINGS:
@@ -79,6 +81,29 @@ def main() -> None:
             a = results[pool][layer]["auroc"]
             if a is not None and a > gb_auroc:
                 gb_auroc, gb_pool, gb_layer = a, pool, layer
+
+    # 1c) TRANSFER probe: train on the PROXY T0 activations (2101 labeled legible traces) and
+    # score the genuine ones. THIS is the deployment scenario — label legible reasoning, deploy on
+    # a model that reasons illegibly — and it has ~7x the training data of the within-genuine
+    # probe above (which sees only ~55 positives, far too few for a 4096-dim diff-of-means).
+    transfer = None
+    t0_path = config.ACTIVATIONS_DIR / f"acts_{config.PROBE_TRAIN_TIER}.npz"
+    if t0_path.exists():
+        z0 = np.load(t0_path)
+        y0 = z0["labels"]
+        q0 = z0["question_ids"]
+        tr0, _ = sweep.question_split(q0, config.PROBE_TEST_FRACTION, config.PROBE_SPLIT_SEED)
+        transfer = {}
+        for pool in config.PROBE_POOLINGS:
+            transfer[pool] = {}
+            for j, layer in enumerate(config.PROBE_LAYERS):
+                # fit on proxy-T0 train rows; score ALL genuine traces (none were in T0's train)
+                transfer[pool][layer] = P.train_eval(z0[pool][tr0, j, :], y0[tr0],
+                                                     acts[pool][:, j, :], labels, config.PROBE_KIND)
+        print(f"[phase4d] transfer probe trained on {len(tr0)} proxy-T0 traces "
+              f"(pos={int(y0[tr0].sum())}) -> scored on all {len(labels)} genuine traces")
+    else:
+        print(f"[phase4d] note: {t0_path} not found — skipping the T0->genuine transfer probe")
 
     # 2) text monitor on the SAME held-out split (apples-to-apples). AUROC is the headline,
     # matching Phase 3 (accuracy is uninformative under class imbalance).
@@ -114,6 +139,7 @@ def main() -> None:
         "genuine_monitor": monitor,
         "phase3_reference": ref,
         "probe_full": results,
+        "transfer_full": transfer,   # proxy-T0-trained probe scored on genuine
     }
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     (config.RESULTS_DIR / "phase4_genuine.json").write_text(json.dumps(out, indent=2))
@@ -126,6 +152,18 @@ def main() -> None:
     print(f"  genuine@T3 probe  (best cell {gb_pool}/L{gb_layer}, ceiling):   AUROC {gb_auroc:.3f}")
     print(f"  genuine@T3 monitor (SmolLM3-3B on genuine text):        AUROC {monitor['auroc']:.3f}"
           f"  (acc {monitor['acc']:.3f}, yes% {monitor['yes_rate']:.3f})")
+    if transfer:
+        cp = (honest or {}).get("pooling") or config.PROBE_POOLINGS[0]
+        cl = (honest or {}).get("layer") or config.PROBE_LAYERS[0]
+        tb_pool, tb_layer, tb_auroc = None, None, -1.0
+        for pool in transfer:
+            for layer in transfer[pool]:
+                a = transfer[pool][layer]["auroc"]
+                if a is not None and a > tb_auroc:
+                    tb_auroc, tb_pool, tb_layer = a, pool, layer
+        print(f"  TRANSFER probe (proxy-T0-trained -> genuine, cell {cp}/L{cl}): "
+              f"AUROC {transfer[cp][cl]['auroc']:.3f}")
+        print(f"  TRANSFER probe (best cell {tb_pool}/L{tb_layer}, ceiling):      AUROC {tb_auroc:.3f}")
     if ref:
         print(f"  --- Phase-3 reference ---")
         print(f"  base@T0  probe {ref['base_T0_probe']:.3f} | monitor {ref['base_T0_monitor']:.3f}")
