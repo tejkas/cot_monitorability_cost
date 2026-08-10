@@ -169,7 +169,14 @@ class Generator:
             logprobs=config.ANSWER_LOGPROBS,  # top-k at each token -> read the answer letter's margin
         )
         prompts = [self._template(u) for u in user_turns]
-        outs = self.llm.generate(prompts, sp)
+        # Pass the adapter per-request — enable_lora on the engine only makes it POSSIBLE; without
+        # a lora_request here the engine runs the BASE model. (This omission silently made all of
+        # Phase 4 generate from base — found 2026-08-09.)
+        lora_req = None
+        if self.lora:
+            from vllm.lora.request import LoRARequest
+            lora_req = LoRARequest("t3", 1, self.lora)
+        outs = self.llm.generate(prompts, sp, lora_request=lora_req)
 
         results: List[List[Sample]] = []
         for out, n_opt in zip(outs, n_options_list):
