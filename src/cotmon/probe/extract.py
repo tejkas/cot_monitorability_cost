@@ -29,7 +29,8 @@ class ActivationExtractor:
     def __init__(self, model: str = config.BASE_MODEL, layers: Optional[List[int]] = None,
                  poolings: Optional[List[str]] = None,
                  batch_size: int = config.EXTRACT_BATCH_SIZE,
-                 max_len: int = config.EXTRACT_MAX_LEN):
+                 max_len: int = config.EXTRACT_MAX_LEN,
+                 lora: Optional[str] = None):
         import torch  # lazy
         from transformers import AutoModel, AutoTokenizer
 
@@ -46,9 +47,21 @@ class ActivationExtractor:
         # AutoModel, NOT AutoModelForCausalLM: the backbone has no lm_head, so it never computes
         # the [B, S, vocab] logits (~9 GiB at batch 8 / seq 4k) we'd only throw away. We want
         # hidden states, not predictions.
-        self.model = AutoModel.from_pretrained(
-            model, torch_dtype=torch.float16, output_hidden_states=True,
-        ).to(self.device).eval()
+        if lora:
+            # Probe the FINE-TUNED model, not the base one. When the LoRA'd model authored the
+            # text, its own activations are the right probe target — base-model activations on
+            # out-of-distribution LoRA notation are a different (and weaker) signal.
+            # merge_and_unload folds the adapter into the weights, then .model drops the lm_head.
+            from peft import PeftModel
+            from transformers import AutoModelForCausalLM
+            m = AutoModelForCausalLM.from_pretrained(model, torch_dtype=torch.float16)
+            m = PeftModel.from_pretrained(m, lora)
+            self.model = m.merge_and_unload().model.to(self.device).eval()
+            print(f"[extract] probing the LoRA-merged model (adapter: {lora})")
+        else:
+            self.model = AutoModel.from_pretrained(
+                model, torch_dtype=torch.float16, output_hidden_states=True,
+            ).to(self.device).eval()
         self.hidden = self.model.config.hidden_size
 
     def extract(self, texts: List[str]) -> Dict[str, np.ndarray]:
@@ -68,7 +81,9 @@ class ActivationExtractor:
             enc = self.tok(batch, return_tensors="pt", padding=True,
                            truncation=True, max_length=self.max_len).to(self.device)
             with torch.no_grad():
-                hs = self.model(**enc).hidden_states  # tuple (n_layers+1) of [B, S, hidden]
+                # request hidden states explicitly (the LoRA-merged backbone isn't loaded with
+                # output_hidden_states baked into its config)
+                hs = self.model(**enc, output_hidden_states=True).hidden_states  # (n_layers+1) x [B,S,H]
 
             masks = enc["attention_mask"].bool().cpu().numpy()          # [B, S]
             # Pull only the layers we need to host memory once (hs[0] = embeddings, hs[L] = block L).

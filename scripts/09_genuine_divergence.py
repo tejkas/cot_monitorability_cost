@@ -17,6 +17,7 @@ Output: results/phase4_genuine.json (+ .png)
 
   python scripts/09_genuine_divergence.py
 """
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -32,6 +33,13 @@ from cotmon.probe.extract import ActivationExtractor  # noqa: E402
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--probe-lora", action="store_true",
+                    help="extract activations from the LoRA-MERGED model (the model that actually "
+                         "authored this reasoning) instead of the base model")
+    args = ap.parse_args()
+    suffix = "_loramodel" if args.probe_lora else ""
+
     rows = [json.loads(l) for l in open(config.DATA_DIR / "traces" / "genuine_traces.jsonl")]
     labels = np.array([r["label"] for r in rows])
     qids = [r["question_id"] for r in rows]
@@ -40,13 +48,14 @@ def main() -> None:
     print(f"[phase4d] {len(rows)} genuine traces (pos={int(labels.sum())}, neg={int((labels == 0).sum())})")
 
     # 1) activations (cache to npz for reuse), then a within-genuine sweep
-    act_path = config.ACTIVATIONS_DIR / "acts_genuine.npz"
+    act_path = config.ACTIVATIONS_DIR / f"acts_genuine{suffix}.npz"
     if act_path.exists():
         z = np.load(act_path)
         acts = {k: z[k].astype(np.float32) for k in z.files}
         print(f"[phase4d] loaded cached activations {act_path}")
     else:
-        extractor = ActivationExtractor()
+        extractor = ActivationExtractor(
+            lora=str(config.RESULTS_DIR / config.LORA_OUT) if args.probe_lora else None)
         acts = extractor.extract(texts)  # {pooling: [n, n_layers, hidden]}
         config.ACTIVATIONS_DIR.mkdir(parents=True, exist_ok=True)
         np.savez(act_path, **{p: acts[p].astype(config.ACT_DTYPE) for p in acts})
@@ -141,8 +150,9 @@ def main() -> None:
         "probe_full": results,
         "transfer_full": transfer,   # proxy-T0-trained probe scored on genuine
     }
+    out["probed_model"] = "lora_merged" if args.probe_lora else "base"
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    (config.RESULTS_DIR / "phase4_genuine.json").write_text(json.dumps(out, indent=2))
+    (config.RESULTS_DIR / f"phase4_genuine{suffix}.json").write_text(json.dumps(out, indent=2))
 
     # report
     print("\n[phase4d] genuine divergence (probe recovers sway where the monitor can't):")
