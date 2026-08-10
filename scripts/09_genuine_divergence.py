@@ -46,10 +46,21 @@ def main() -> None:
         acts = {k: z[k].astype(np.float32) for k in z.files}
         print(f"[phase4d] loaded cached activations {act_path}")
     else:
-        acts = ActivationExtractor().extract(texts)  # {pooling: [n, n_layers, hidden]}
+        extractor = ActivationExtractor()
+        acts = extractor.extract(texts)  # {pooling: [n, n_layers, hidden]}
         config.ACTIVATIONS_DIR.mkdir(parents=True, exist_ok=True)
         np.savez(act_path, **{p: acts[p].astype(config.ACT_DTYPE) for p in acts})
         print(f"[phase4d] wrote {act_path}")
+        # Free the HF model BEFORE vLLM starts: torch's caching allocator keeps the ~16GB of
+        # Qwen3-8B weights reserved even after the object dies, so vLLM's 0.9 utilization
+        # request fails ("Free memory ... less than desired GPU memory utilization").
+        import gc
+
+        import torch
+        del extractor
+        gc.collect()
+        torch.cuda.empty_cache()
+        print("[phase4d] released the extractor's GPU memory before loading the monitor")
 
     tr, te = sweep.question_split(qids, config.PROBE_TEST_FRACTION, config.PROBE_SPLIT_SEED)
     y_tr, y_te = labels[tr], labels[te]
