@@ -64,6 +64,22 @@ class ActivationExtractor:
             ).to(self.device).eval()
         self.hidden = self.model.config.hidden_size
 
+    def chat_prompt(self, user_turn: str) -> str:
+        """Chat-templated prompt string, matching what the model saw at generation time.
+
+        Teacher-forcing only reproduces generation-time activations if the prefix is the SAME
+        prefix the model actually conditioned on — so the prompt must go through the chat
+        template exactly as data/generate.Generator._template does it.
+        """
+        try:
+            return self.tok.apply_chat_template(
+                [{"role": "user", "content": user_turn}],
+                tokenize=False, add_generation_prompt=True, enable_thinking=True)
+        except TypeError:  # template without the thinking kwarg
+            return self.tok.apply_chat_template(
+                [{"role": "user", "content": user_turn}],
+                tokenize=False, add_generation_prompt=True)
+
     def extract(self, texts: List[str],
                 prompts: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         """Return {pooling: [n_texts, n_layers, hidden]} (float32).

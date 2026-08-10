@@ -20,13 +20,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from cotmon import config  # noqa: E402
 from cotmon.probe import probe as P  # noqa: E402
 from cotmon.probe import sweep  # noqa: E402
+from cotmon.monitor import surface as surf  # noqa: E402
 from cotmon.monitor import text_monitor as tm  # noqa: E402
 
 
-def load_activations(act_dir: Path):
+def load_activations(act_dir: Path, suffix: str = ""):
     acts_by_tier, labels, qids = {}, None, None
     for tier in config.TIER_NAMES:
-        z = np.load(act_dir / f"acts_{tier}.npz")
+        z = np.load(act_dir / f"acts_{tier}{suffix}.npz")
         acts_by_tier[tier] = {k: z[k] for k in z.files if k not in ("labels", "question_ids")}
         labels, qids = z["labels"], z["question_ids"]
     return acts_by_tier, labels, qids
@@ -44,8 +45,18 @@ def pick_best_cell(results: dict, tier: str):
 
 
 def main() -> None:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--suffix", default="_prompted",
+                    help="activation file suffix ('_prompted' = question+hint in context)")
+    ap.add_argument("--strip-conclusion", action="store_true",
+                    help="hide each CoT's own answer statement from the text monitor")
+    ap.add_argument("--no-monitor", action="store_true", help="skip the GPU monitor pass")
+    args = ap.parse_args()
+
     rows = [json.loads(l) for l in open(config.DATA_DIR / "traces" / "phase2_tiers.jsonl")]
-    acts_by_tier, labels, qids = load_activations(config.ACTIVATIONS_DIR)
+    acts_by_tier, labels, qids = load_activations(config.ACTIVATIONS_DIR, args.suffix)
+    print(f"[phase3] activations: acts_*{args.suffix}.npz")
 
     # 1) probe sweep + best cell (selected on the train tier's held-out AUROC)
     probe_results = sweep.run_sweep(acts_by_tier, labels, qids)
@@ -65,40 +76,63 @@ def main() -> None:
     # 2) text monitor on the SAME held-out split (leakage-safe, apples-to-apples). AUROC is the
     # headline (imbalance-robust); acc + yes_rate expose a degenerate constant classifier.
     y_te = labels[te]
+    y_tr = labels[tr]
     hints_te = [rows[i]["hint_target"] for i in te]
     base_rate = float(np.mean(y_te == 0))  # accuracy of always predicting "not swayed"
-    monitor = tm.TextMonitor()
-    text_by_tier = {}
+
+    # 1c) TF-IDF SURFACE FLOOR — whatever plain word statistics achieve is NOT evidence of
+    # semantic detection. Probes fire on surface keywords (McKenzie), so every other detector
+    # must clear this bar to claim it is doing more than counting words.
+    surface_by_tier = {}
     for t in config.TIER_NAMES:
-        texts_te = [rows[i]["tiers"][t] for i in te]
-        scores = np.array(monitor.predict_scores(texts_te, hints_te))
-        preds = scores > 0.5
-        text_by_tier[t] = {
-            "auroc": P.auroc(y_te, scores),
-            "acc": float(np.mean(preds == (y_te == 1))),
-            "yes_rate": float(np.mean(preds)),
-        }
+        txt = [r["tiers"][t] for r in rows]
+        surface_by_tier[t] = surf.train_eval_surface(
+            [txt[i] for i in tr], y_tr, [txt[i] for i in te], y_te)
+
+    text_by_tier = {}
+    if not args.no_monitor:
+        monitor = tm.TextMonitor(strip_conclusion=args.strip_conclusion)
+        for t in config.TIER_NAMES:
+            texts_te = [rows[i]["tiers"][t] for i in te]
+            scores = np.array(monitor.predict_scores(texts_te, hints_te))
+            preds = scores > 0.5
+            text_by_tier[t] = {
+                "auroc": P.auroc(y_te, scores),
+                "tpr@1fpr": P.tpr_at_fpr(y_te, scores, 0.01),
+                "acc": float(np.mean(preds == (y_te == 1))),
+                "yes_rate": float(np.mean(preds)),
+            }
+    else:
+        text_by_tier = {t: {"auroc": float("nan"), "tpr@1fpr": float("nan"),
+                            "acc": float("nan"), "yes_rate": float("nan")}
+                        for t in config.TIER_NAMES}
 
     # 3) assemble + save + print the divergence
     out = config.RESULTS_DIR
     out.mkdir(parents=True, exist_ok=True)
-    result = {"best_cell": {"pooling": pool, "layer": layer},
+    result = {"best_cell": {"pooling": pool, "layer": layer,
+                            "depth_fraction": round(layer / 36, 2)},
+              "activation_context": "prompt+completion" if args.suffix == "_prompted" else "completion only",
               "base_rate": base_rate,
               "probe": probe_by_tier,            # T0-trained, evaluated on each tier (transfer)
               "probe_diagonal": diag_by_tier,    # trained AND evaluated within each tier
+              "surface_tfidf": surface_by_tier,  # lexical floor every detector must clear
               "text_monitor": text_by_tier, "probe_full": probe_results}
-    with (out / "phase3_divergence.json").open("w") as f:
+    with (out / f"phase3_divergence{args.suffix}.json").open("w") as f:
         json.dump(result, f, indent=2)
 
-    print(f"\n[phase3] best probe cell: pooling={pool} layer={layer} (selected on {config.PROBE_TRAIN_TIER})")
-    print(f"[phase3] base rate (always 'not swayed') = {base_rate:.3f}  <- monitor acc AT this = no signal")
-    print(f"{'tier':16s}{'probe_xfer':>11s}{'probe_diag':>11s}{'mon_auroc':>10s}{'mon_acc':>9s}{'mon_yes%':>9s}")
-    print("-" * 66)
+    print(f"\n[phase3] best probe cell: pooling={pool} layer={layer} "
+          f"({layer / 36:.2f} of depth; selected on {config.PROBE_TRAIN_TIER})")
+    print(f"[phase3] base rate (always 'not swayed') = {base_rate:.3f}")
+    print(f"{'tier':16s}{'probe_xfer':>11s}{'probe_diag':>11s}{'TFIDF':>8s}{'mon_auroc':>10s}"
+          f"{'probe_tpr':>10s}{'mon_yes%':>9s}")
+    print("-" * 74)
     for t in config.TIER_NAMES:
         print(f"{t:16s}{probe_by_tier[t]['auroc']:>11.3f}{diag_by_tier[t]['auroc']:>11.3f}"
-              f"{text_by_tier[t]['auroc']:>10.3f}{text_by_tier[t]['acc']:>9.3f}"
-              f"{text_by_tier[t]['yes_rate']:>9.3f}")
-    print(f"\n[phase3] wrote {out / 'phase3_divergence.json'}")
+              f"{surface_by_tier[t]['auroc']:>8.3f}{text_by_tier[t]['auroc']:>10.3f}"
+              f"{probe_by_tier[t]['tpr@1fpr']:>10.3f}{text_by_tier[t]['yes_rate']:>9.3f}")
+    print("\n  TFIDF = surface floor: any detector near this column is not doing anything semantic.")
+    print(f"\n[phase3] wrote {out / f'phase3_divergence{args.suffix}.json'}")
 
     _plot(probe_by_tier, text_by_tier, out / "phase3_divergence.png")
 
