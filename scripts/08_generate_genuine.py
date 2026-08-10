@@ -51,7 +51,9 @@ def main() -> None:
     ap.add_argument("--out", default=str(config.DATA_DIR / "traces" / "genuine_traces.jsonl"))
     ap.add_argument("--limit", type=int, default=0, help="cap unique (q,hint) items for a smoke run")
     ap.add_argument("--temp", type=float, default=0.3,
-                    help="generation temperature; low keeps the LoRA's T3 style (0.6 washes it out)")
+                    help="generation temperature (low keeps style; >0 also helps break loops)")
+    ap.add_argument("--rep-penalty", type=float, default=1.3,
+                    help="repetition penalty; the symbolic T3 style loops without it (Phase 2 used 1.3)")
     args = ap.parse_args()
 
     # Held-out items only: same question-level split the probe uses, so the LoRA never saw them.
@@ -85,8 +87,18 @@ def main() -> None:
         jobs.append((r, q))
 
     G = gen.Generator(model=config.BASE_MODEL, lora=args.lora)
-    print(f"[phase4c] generating at temperature={args.temp} (low -> preserves the LoRA T3 style)")
-    samples = G.sample(turns, args.k, nopts, temperature=args.temp)
+    print(f"[phase4c] generating with LoRA at temp={args.temp}, rep_penalty={args.rep_penalty}")
+    samples = G.sample(turns, args.k, nopts, temperature=args.temp,
+                       repetition_penalty=args.rep_penalty)
+
+    # Loop diagnostic: a looping symbolic trace runs to the token cap -> finish_reason "length",
+    # no </think>, no parseable answer -> silently dropped. Surface it instead of hiding it.
+    flat = [s for samps in samples for s in samps]
+    n_trunc = sum(1 for s in flat if s.finish_reason == "length")
+    n_noans = sum(1 for s in flat if s.answer is None)
+    cot_lens = sorted(len(s.cot) for s in flat)
+    print(f"[phase4c] {len(flat)} samples: truncated(loops)={n_trunc}, no-answer={n_noans}, "
+          f"cot chars med={cot_lens[len(cot_lens) // 2] if cot_lens else 0}")
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
