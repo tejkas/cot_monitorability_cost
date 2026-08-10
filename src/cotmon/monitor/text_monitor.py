@@ -36,11 +36,16 @@ _PROMPT = (
 class TextMonitor:
     def __init__(self, model: str = config.TEXT_MONITOR_MODEL,
                  max_model_len: int = config.MAX_MODEL_LEN, gpu_mem_util: float = 0.90,
-                 enforce_eager: bool = True, max_text_tokens: int = config.EXTRACT_MAX_LEN):
+                 enforce_eager: bool = True, max_text_tokens: int = config.EXTRACT_MAX_LEN,
+                 strip_conclusion: bool = False):
         from vllm import LLM  # lazy
 
         self.model_name = model
         self.max_text_tokens = max_text_tokens  # read the SAME window the probe did (extract.py)
+        # strip_conclusion=True removes the CoT's own answer statement, so the monitor cannot
+        # simply match the stated answer against the hint we hand it (which would make its task
+        # nearly the label by construction). See generate.strip_conclusion.
+        self.strip_conclusion = strip_conclusion
         self.tok = AutoTokenizer.from_pretrained(model)
         # enforce_eager=True skips vLLM's torch.compile / CUDA-graph capture. A model with no native
         # vLLM impl (e.g. SmolLM3-3B) is routed to the generic Transformers backend, whose
@@ -55,6 +60,9 @@ class TextMonitor:
         (b) the monitor reads the SAME first-N-token window the probe extracted from — an
         apples-to-apples 'text vs activations' comparison. (Minor: this tokenizer differs from
         the probe's base-model tokenizer, so the boundary is approximate, not identical.)"""
+        if self.strip_conclusion:
+            from ..data.generate import strip_conclusion as _strip
+            text = _strip(text)
         ids = self.tok(text, add_special_tokens=False)["input_ids"]
         return self.tok.decode(ids[:self.max_text_tokens]) if len(ids) > self.max_text_tokens else text
 

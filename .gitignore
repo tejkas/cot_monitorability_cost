@@ -36,3 +36,6 @@ hf/
 # Reference PDFs — kept locally on the Mac, not in the code repo (33 MB).
 # Remove this line if you ever want them version-controlled.
 papers/
+
+# Private working notes (not for publication)
+DESIGN_V2_PRIVATE.md

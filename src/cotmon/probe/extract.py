@@ -64,22 +64,56 @@ class ActivationExtractor:
             ).to(self.device).eval()
         self.hidden = self.model.config.hidden_size
 
-    def extract(self, texts: List[str]) -> Dict[str, np.ndarray]:
-        """Re-encode `texts`; return {pooling: [n_texts, n_layers, hidden]} (float32)."""
+    def extract(self, texts: List[str],
+                prompts: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
+        """Return {pooling: [n_texts, n_layers, hidden]} (float32).
+
+        prompts is the CORRECT mode and should always be supplied: the forward pass covers
+        `prompt + text`, but pooling is restricted to the TEXT (completion) positions. Because
+        attention is causal, a teacher-forced pass over prompt+completion reproduces the model's
+        generation-time hidden states exactly — so this measures the state the model was in while
+        AUTHORING, with the question and hint in context.
+
+        This matches the only published precedent for probing a property of a model's own response
+        (Aremu et al.: teacher-forced prompt+completion at train time, pooling over assistant
+        tokens only, prompt always in context). NO paper feeds the response in isolation.
+
+        prompts=None reproduces the old prompt-free behaviour and is kept only for reproducing
+        earlier results — it asks the probe to detect hint-deference from activations that never
+        saw the hint. It warns loudly.
+        """
         torch = self.torch
         n = len(texts)
+        if prompts is None:
+            print("[extract] WARNING: no prompts given -> pooling over the completion ALONE. "
+                  "The model never sees the question/hint; this has no precedent in the "
+                  "literature and understates recoverable signal. Pass prompts=...", flush=True)
+        elif len(prompts) != n:
+            raise ValueError(f"prompts ({len(prompts)}) and texts ({n}) must be the same length")
+
         out = {p: np.empty((n, len(self.layers), self.hidden), dtype=np.float32)
                for p in self.poolings}
 
         n_batches = (n + self.batch_size - 1) // self.batch_size
         print(f"[extract] {n} texts on {self.device} -> {n_batches} batches of {self.batch_size} "
-              f"(max_len={self.max_len})",  # log the truncation window so it's never ambiguous
+              f"(max_len={self.max_len}, "
+              f"context={'prompt+completion' if prompts else 'completion only'})",
               flush=True)  # flush: stdout is buffered under nohup/redirect; without this you go blind
         t0 = time.time()
+        self.tok.padding_side = "right"  # keeps prompt-length offsets valid per row
         for bidx, start in enumerate(range(0, n, self.batch_size)):
             batch = texts[start:start + self.batch_size]
-            enc = self.tok(batch, return_tensors="pt", padding=True,
-                           truncation=True, max_length=self.max_len).to(self.device)
+            if prompts is None:
+                seqs, plens = batch, [0] * len(batch)
+            else:
+                pbatch = prompts[start:start + self.batch_size]
+                seqs = [p + t for p, t in zip(pbatch, batch)]
+                # token length of each prompt -> where the completion span begins.
+                # add_special_tokens=False everywhere so the two tokenizations stay aligned.
+                plens = [len(self.tok(p, add_special_tokens=False)["input_ids"]) for p in pbatch]
+            enc = self.tok(seqs, return_tensors="pt", padding=True, truncation=True,
+                           max_length=self.max_len,
+                           add_special_tokens=prompts is None).to(self.device)
             with torch.no_grad():
                 # request hidden states explicitly (the LoRA-merged backbone isn't loaded with
                 # output_hidden_states baked into its config)
@@ -90,10 +124,17 @@ class ActivationExtractor:
             layer_arrs = [hs[L].float().cpu().numpy() for L in self.layers]  # each [B, S, hidden]
 
             for bi in range(len(batch)):
-                m = masks[bi]  # [S] bool — real vs pad tokens
+                m = masks[bi].copy()  # [S] bool — real vs pad tokens
+                if plens[bi]:
+                    # Drop PROMPT positions from pooling: the prompt is in context (it conditions
+                    # every completion activation via causal attention) but must not be pooled,
+                    # or the probe could score on question identity alone.
+                    m[:plens[bi]] = False
                 if not m.any():
-                    # empty/blank text -> all-pad row; last_pool would IndexError. Fall back to the
-                    # whole row so we emit a (meaningless-but-finite) vector instead of crashing.
+                    # empty/blank completion (or fully truncated) -> all-pad row; last_pool would
+                    # IndexError. Fall back to the real tokens so we emit a finite vector.
+                    m = masks[bi].copy()
+                if not m.any():
                     m = np.ones_like(m)
                 for p in self.poolings:
                     for j in range(len(self.layers)):

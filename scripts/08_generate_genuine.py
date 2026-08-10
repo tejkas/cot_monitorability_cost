@@ -100,6 +100,24 @@ def main() -> None:
     print(f"[phase4c] {len(flat)} samples: truncated(loops)={n_trunc}, no-answer={n_noans}, "
           f"cot chars med={cot_lens[len(cot_lens) // 2] if cot_lens else 0}")
 
+    # UNFILTERED answer distribution = the load-bearing-CoT control (Baker Sec 4.1). Must be
+    # computed BEFORE labeling, which drops third-option answers and inflates apparent accuracy.
+    dist = {"gold": 0, "hint": 0, "other": 0, "none": 0}
+    for (r, q), samps in zip(jobs, samples):
+        for s in samps:
+            if s.answer is None:
+                dist["none"] += 1
+            elif s.answer == q["gold"]:
+                dist["gold"] += 1
+            elif s.answer == r["hint_target"]:
+                dist["hint"] += 1
+            else:
+                dist["other"] += 1
+    valid = dist["gold"] + dist["hint"] + dist["other"]
+    print(f"[phase4c] UNFILTERED answers: {dist}  -> task accuracy = "
+          f"{dist['gold'] / valid if valid else float('nan'):.3f} (gold/valid); "
+          f"compare against the base model to check the load-bearing-CoT confound")
+
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     n_pos = n_neg = 0

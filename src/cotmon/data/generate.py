@@ -13,8 +13,6 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
-from transformers import AutoTokenizer
-
 from .. import config
 
 LETTERS = [chr(ord("A") + i) for i in range(26)]
@@ -68,6 +66,40 @@ def parse_answer(answer_text: str, n_options: int) -> Optional[str]:
         if hits:
             return hits[-1]
     return None
+
+
+# Declarations of the final choice — used to CUT the conclusion off a CoT (not to parse it).
+# Deliberately broad: covers prose ("the answer is C"), headers ("### Final Answer"), and the
+# LoRA's symbolic shorthand ("Ans=F", "Ans:H", "=>C=(F)").
+_CONCLUSION_PATTERNS = [
+    re.compile(r"final\s*answer", re.I),
+    re.compile(r"\bans\s*[:=]", re.I),
+    re.compile(r"answer\s*is\b", re.I),
+    re.compile(r"=>\s*\(?[A-Z]\)?\s*$", re.M),
+    re.compile(r"\bconcl", re.I),
+]
+
+
+def strip_conclusion(text: str, max_cut: float = 0.30, min_cut: float = 0.02) -> str:
+    """Remove the CoT's own statement of its final choice, cutting a BOUNDED tail.
+
+    Why: our label IS "did the answer equal the hint", and the CoT usually states its answer while
+    the prompt states the hint. A detector that can read both is doing ANSWER MATCHING, not
+    monitoring the reasoning. Cutting the conclusion forces detectors to judge the reasoning
+    *process*. Report with and without, as a robustness check.
+
+    Cuts at the LAST conclusion marker (verbose CoT says "answer is" repeatedly mid-reasoning;
+    cutting at the first such marker past the midpoint removed 46% of a T0 trace but 1% of a T3
+    one — an asymmetry that would confound the very comparison we are making). Removal is then
+    clamped to [min_cut, max_cut] of the text so no condition loses a wildly different share.
+    """
+    if not text:
+        return text
+    n = len(text)
+    positions = [m.start() for pat in _CONCLUSION_PATTERNS for m in pat.finditer(text)]
+    cut = max(positions) if positions else int(n * 0.85)
+    cut = min(max(cut, int(n * (1.0 - max_cut))), int(n * (1.0 - min_cut)))
+    return text[:cut].rstrip()
 
 
 def _letter_from_tok(s: str, valid: set) -> Optional[str]:
@@ -138,6 +170,7 @@ class Generator:
 
     def __init__(self, model: str = config.BASE_MODEL, max_model_len: int = config.MAX_MODEL_LEN,
                  gpu_mem_util: float = 0.90, lora: Optional[str] = None):
+        from transformers import AutoTokenizer  # lazy: keeps this module importable on the Mac
         from vllm import LLM  # lazy import
 
         self.tok = AutoTokenizer.from_pretrained(model)
