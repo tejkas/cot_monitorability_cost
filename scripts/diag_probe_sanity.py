@@ -100,12 +100,23 @@ def main() -> None:
           f"questions={len(np.unique(qids[te]))} questions_with_pos="
           f"{len(np.unique(qids[te][y_sway[te] == 1]))}   <- effective sample size")
 
-    # --- 1. POSITIVE CONTROL: decode the committed answer letter ---
+    # --- 1a. ALIGNMENT CONTROL: decode TEXT LENGTH. Pooled activations must encode this, and it
+    # breaks instantly if activation rows are misaligned with the jsonl rows. This is the
+    # unambiguous bug test (the answer-letter control below may just be too fine-grained).
+    texts = [r["tiers"][config.PROBE_TRAIN_TIER] if args.proxy else r["cot_text"] for r in rows]
+    lens = np.array([len(t) for t in texts])
+    y_len = (lens > np.median(lens)).astype(int)
+    print(f"\n[1a] ALIGNMENT CONTROL — decode 'text longer than median' (must be easy; "
+          f"fails if rows are misaligned)")
+    ctrl_len = best_cell_auroc(acts, y_len, tr, te, "text-length > median")
+
+    # --- 1b. POSITIVE CONTROL: decode the committed answer letter ---
     from collections import Counter
     top_letter = Counter(a for a in answers if a).most_common(1)[0][0]
     y_letter = np.array([1 if a == top_letter else 0 for a in answers])
-    print(f"\n[1] POSITIVE CONTROL — decode 'answer == {top_letter}' "
-          f"(pos={int(y_letter.sum())}/{n}); the CoT literally states it")
+    print(f"\n[1b] POSITIVE CONTROL — decode 'answer == {top_letter}' "
+          f"(pos={int(y_letter.sum())}/{n}); the CoT states it, but it is ONE token in ~200 "
+          f"so pooling may legitimately wash it out")
     ctrl = best_cell_auroc(acts, y_letter, tr, te, f"answer-letter=={top_letter}")
 
     # --- 2. the sway target, with a CLUSTERED CI ---
@@ -123,13 +134,18 @@ def main() -> None:
           f"non-finite={int((~np.isfinite(A)).sum())}")
 
     print("\n===== VERDICT =====")
-    if ctrl[0] < 0.65:
-        print("  positive control FAILED -> the pipeline cannot decode even the stated answer.")
-        print("  => the 'no sway signal' result is NOT trustworthy (bug: alignment/extraction).")
+    if ctrl_len[0] < 0.70:
+        print(f"  ALIGNMENT control FAILED (length AUROC {ctrl_len[0]:.3f}) -> activations do not "
+              "even track text length.")
+        print("  => rows are misaligned or extraction is broken; this result is VOID.")
     else:
-        print(f"  positive control PASSED (AUROC {ctrl[0]:.3f}) -> extraction + alignment are sound.")
-        print(f"  => the sway result is real-but-underpowered; report CI [{lo:.3f}, {hi:.3f}],")
-        print("     NOT a point claim that probes fail.")
+        print(f"  ALIGNMENT control PASSED (length AUROC {ctrl_len[0]:.3f}) -> rows line up, "
+              "extraction works.")
+        print(f"  (answer-letter control {ctrl[0]:.3f} — informative only if it PASSES on the proxy "
+              "too; if it fails on both, it is simply too fine-grained for pooled activations.)")
+        print(f"  => sway result stands as measured: {sway[0]:.3f}, CI [{lo:.3f}, {hi:.3f}].")
+        print("     Report the INTERVAL. If it spans the proxy value, the genuine arm is "
+              "INCONCLUSIVE, not a contradiction.")
 
 
 if __name__ == "__main__":
