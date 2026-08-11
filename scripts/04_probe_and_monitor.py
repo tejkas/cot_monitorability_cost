@@ -86,6 +86,9 @@ def main() -> None:
     surface_by_tier = {}
     for t in config.TIER_NAMES:
         txt = [r["tiers"][t] for r in rows]
+        if args.strip_conclusion:   # same view the monitor gets, so the floor stays comparable
+            from cotmon.data.generate import strip_conclusion as _strip
+            txt = [_strip(x) for x in txt]
         surface_by_tier[t] = surf.train_eval_surface(
             [txt[i] for i in tr], y_tr, [txt[i] for i in te], y_te)
 

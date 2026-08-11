@@ -47,8 +47,13 @@ def main() -> None:
                     help="reproduce the old prompt-free extraction (for the methods comparison only)")
     ap.add_argument("--suffix", default=None,
                     help="output filename suffix; defaults to '_prompted' unless --no-prompt")
+    ap.add_argument("--strip-conclusion", action="store_true",
+                    help="remove each CoT's own answer statement BEFORE extraction, so the probe "
+                         "cannot score by matching the stated answer against the hint in the prompt")
     args = ap.parse_args()
     suffix = args.suffix if args.suffix is not None else ("" if args.no_prompt else "_prompted")
+    if args.strip_conclusion and args.suffix is None:
+        suffix += "_stripped"
 
     rows = [json.loads(l) for l in open(args.in_path)]
     if args.limit:
@@ -85,6 +90,10 @@ def main() -> None:
 
     for tier in todo:
         texts = [r["tiers"][tier] for r in rows]
+        if args.strip_conclusion:
+            from cotmon.data.generate import strip_conclusion as _strip
+            texts = [_strip(t) for t in texts]
+            print(f"[phase3a] {tier}: conclusions stripped before extraction", flush=True)
         n_empty = sum(1 for t in texts if not t or not t.strip())
         if n_empty:
             print(f"[phase3a] WARNING: {tier} has {n_empty} empty/blank texts (handled, but check Phase 2)",

@@ -37,12 +37,31 @@ def load_mmlu_index() -> dict:
     return idx
 
 
+def degeneracy(text: str, n: int = 6) -> float:
+    """Fraction of repeated character n-grams. ~0 = varied text, ->1 = a loop.
+
+    Phase 2's per-tier repetition penalty tamed most T3 loops but not all: 137/3002 T3 rewrites
+    are degenerate (>0.5 repeats AND >2000 chars), the worst being a 496k-char character run.
+    Training on those teaches the LoRA to loop — a likely driver of the ~30% of Phase-4 samples
+    lost to runaway generation. Filter them out of the SFT set.
+    """
+    if len(text) < n * 2:
+        return 0.0
+    grams = [text[i:i + n] for i in range(len(text) - n)]
+    return 1.0 - len(set(grams)) / len(grams)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="in_path",
                     default=str(config.DATA_DIR / "traces" / "phase2_tiers.jsonl"))
     ap.add_argument("--out", default=str(config.DATA_DIR / "traces" / "lora_sft.jsonl"))
     ap.add_argument("--tier", default=config.LORA_TRAIN_TIER)
+    ap.add_argument("--max-degeneracy", type=float, default=0.40,
+                    help="drop SFT targets with more repeated 6-grams than this")
+    ap.add_argument("--max-chars", type=int, default=2000,
+                    help="drop SFT targets longer than this (T3 median is ~278 chars)")
+    ap.add_argument("--no-filter", action="store_true", help="keep degenerate targets (old behaviour)")
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in open(args.in_path)]
@@ -53,10 +72,15 @@ def main() -> None:
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    n = miss = 0
+    n = miss = dropped = 0
     with out_path.open("w") as f:
         for i, r in enumerate(rows):
             if i not in tr_rows:
+                continue
+            target_cot = r["tiers"][args.tier]
+            if not args.no_filter and (len(target_cot) > args.max_chars
+                                       or degeneracy(target_cot) > args.max_degeneracy):
+                dropped += 1          # degenerate/looping target -> would teach the LoRA to loop
                 continue
             q = mmlu.get(r["question_id"])
             if q is None:
@@ -71,7 +95,8 @@ def main() -> None:
                 {"role": "assistant", "content": target},
             ]}) + "\n")
             n += 1
-    print(f"[phase4a] wrote {out_path}  ({n} SFT pairs from the train split; {miss} skipped: no MMLU match)")
+    print(f"[phase4a] wrote {out_path}  ({n} SFT pairs from the train split; "
+          f"{dropped} dropped as degenerate/looping targets; {miss} skipped: no MMLU match)")
 
 
 if __name__ == "__main__":

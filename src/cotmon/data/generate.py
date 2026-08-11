@@ -179,15 +179,21 @@ class Generator:
         self.llm = LLM(model=model, dtype="float16",
                        gpu_memory_utilization=gpu_mem_util, max_model_len=max_model_len, **kw)
 
-    def _template(self, user_turn: str) -> str:
+    def _template(self, user_turn: str, thinking: bool = True) -> str:
+        # thinking=False is the no-CoT arm of the CoT-NECESSITY check: the literature admits a
+        # task only if reasoning measurably helps (Zolkowski screens on a significant CoT-vs-no-CoT
+        # gain), otherwise "illegible CoT hurts monitoring" is confounded with "the CoT never
+        # mattered". Qwen3 toggles this on the SAME weights, so it is a clean within-model contrast.
         return self.tok.apply_chat_template(
             [{"role": "user", "content": user_turn}],
-            tokenize=False, add_generation_prompt=True, enable_thinking=True,
+            tokenize=False, add_generation_prompt=True, enable_thinking=thinking,
         )
 
     def sample(self, user_turns: List[str], k: int, n_options_list: List[int],
                temperature: Optional[float] = None,
-               repetition_penalty: float = 1.0) -> List[List[Sample]]:
+               repetition_penalty: float = 1.0,
+               thinking: bool = True,
+               max_tokens: Optional[int] = None) -> List[List[Sample]]:
         """For each user turn, return k parsed Samples. Batched across all turns.
 
         temperature/repetition_penalty override the config defaults for Phase 4 genuine
@@ -201,10 +207,10 @@ class Generator:
             n=k, temperature=config.GEN_TEMPERATURE if temperature is None else temperature,
             top_p=config.GEN_TOP_P, top_k=config.GEN_TOP_K,
             repetition_penalty=repetition_penalty,
-            max_tokens=config.GEN_MAX_NEW_TOKENS, seed=config.SEED,
+            max_tokens=max_tokens or config.GEN_MAX_NEW_TOKENS, seed=config.SEED,
             logprobs=config.ANSWER_LOGPROBS,  # top-k at each token -> read the answer letter's margin
         )
-        prompts = [self._template(u) for u in user_turns]
+        prompts = [self._template(u, thinking=thinking) for u in user_turns]
         # Pass the adapter per-request — enable_lora on the engine only makes it POSSIBLE; without
         # a lora_request here the engine runs the BASE model. (This omission silently made all of
         # Phase 4 generate from base — found 2026-08-09.)
