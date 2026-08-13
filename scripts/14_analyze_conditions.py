@@ -107,7 +107,9 @@ def main() -> None:
               f"questions_with_pos={len(np.unique(q_te[y_te == 1]))} ===", flush=True)
 
         # --- activations: prompt+CoT teacher-forced, pooled over CoT positions ---
-        cache = config.ACTIVATIONS_DIR / f"acts_{cond}{'_stripped' if args.strip_conclusion else ''}.npz"
+        # n in the filename: a small smoke run must never silently poison a full run's cache
+        tag = f"{cond}_n{len(sub)}{'_stripped' if args.strip_conclusion else ''}"
+        cache = config.ACTIVATIONS_DIR / f"acts_{tag}.npz"
         if cache.exists():
             z = np.load(cache)
             acts = {p: z[p] for p in config.PROBE_POOLINGS}
@@ -118,23 +120,35 @@ def main() -> None:
             np.savez(cache, **{p: acts[p].astype(config.ACT_DTYPE) for p in acts})
             print(f"[phase4x] wrote {cache}")
 
-        # --- probe: sweep cells on TRAIN only, then report that cell on eval ---
+        # --- probe: sweep cells INSIDE the training set, then report that cell on eval ---
+        # The inner split is by QUESTION, not by row: k traces share a question, so a row split
+        # would leak siblings between selection-train and selection-val and bias the cell choice.
+        q_tr = q[tr]
+        uq = np.unique(q_tr)
+        inner_val_q = set(uq[: max(1, len(uq) // 3)].tolist())
+        in_val = np.array([qq in inner_val_q for qq in q_tr])
         best = (-1.0, None, None)
-        for pool in config.PROBE_POOLINGS:
-            for j, layer in enumerate(config.PROBE_LAYERS):
-                # cell selection uses a train/train split so eval stays untouched
-                half = len(tr) // 2
-                m = P.train_eval(acts[pool][tr[:half], j, :], y_tr[:half],
-                                 acts[pool][tr[half:], j, :], y_tr[half:], config.PROBE_KIND)
-                if m["auroc"] == m["auroc"] and m["auroc"] > best[0]:
-                    best = (m["auroc"], pool, layer)
+        if in_val.any() and (~in_val).any() and len(np.unique(y_tr[in_val])) > 1 \
+                and len(np.unique(y_tr[~in_val])) > 1:
+            for pool in config.PROBE_POOLINGS:
+                for j, layer in enumerate(config.PROBE_LAYERS):
+                    m = P.train_eval(acts[pool][tr[~in_val], j, :], y_tr[~in_val],
+                                     acts[pool][tr[in_val], j, :], y_tr[in_val], config.PROBE_KIND)
+                    if m["auroc"] == m["auroc"] and m["auroc"] > best[0]:
+                        best = (m["auroc"], pool, layer)
         _, pool, layer = best
+        if pool is None:
+            # too little/too degenerate training data to select a cell (e.g. a smoke run):
+            # fall back to the configured default rather than crashing downstream.
+            pool, layer = config.PROBE_POOLINGS[0], config.PROBE_LAYERS[len(config.PROBE_LAYERS) // 2]
+            print(f"[phase4x] WARNING: cell selection failed (train too small/degenerate); "
+                  f"falling back to {pool}/L{layer}", flush=True)
         j = config.PROBE_LAYERS.index(layer)
         pr = P._PROBES[config.PROBE_KIND]().fit(np.asarray(acts[pool][tr, j, :], np.float32), y_tr)
         s_probe = pr.decision_scores(np.asarray(acts[pool][te, j, :], np.float32))
 
         # --- prompt-only floor: same probe recipe, activations of the PROMPT alone ---
-        pcache = config.ACTIVATIONS_DIR / f"acts_{cond}_promptonly.npz"
+        pcache = config.ACTIVATIONS_DIR / f"acts_{cond}_n{len(sub)}_promptonly.npz"
         if pcache.exists():
             pacts = {p: np.load(pcache)[p] for p in config.PROBE_POOLINGS}
         else:
