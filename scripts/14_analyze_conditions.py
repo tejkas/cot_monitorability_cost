@@ -1,0 +1,198 @@
+#!/usr/bin/env python
+"""Phase 4 (expanded) — the single analysis: probe vs text detectors, legible vs illegible.
+
+One table. Every column exists for a stated reason:
+
+  probe            activation probe, trained on Set B and evaluated on Set C, WITHIN condition
+                   (the standard probing setup: same distribution, disjoint questions)
+  prompt_only      floor: what is knowable from the question+hint BEFORE any reasoning exists.
+                   Nothing below this line is evidence that a detector read the reasoning.
+  tfidf            floor: what is knowable from surface word statistics alone (McKenzie found
+                   probes DO fire on surface keywords, so this must be measured)
+  monitor_weak     prompted LLM monitor (the deployment-realistic, cheaper-than-the-model case)
+  monitor_strong   prompted LLM monitor, large — the fair upper bound for text-based detection
+  task_accuracy    the load-bearing-CoT control: if the illegible condition is much less accurate,
+                   reduced detectability may mean degraded REASONING, not reduced monitorability
+
+Metrics: AUROC (probe-literature primary) + TPR@1%FPR (deployment operating point, used by both
+literatures) + 95% CIs bootstrapped over QUESTIONS, since k samples per question are correlated.
+
+Activations are teacher-forced over `prompt + CoT` and pooled over CoT positions only — matching
+the model's generation-time state, with the question and hint in context.
+
+  python scripts/14_analyze_conditions.py
+  python scripts/14_analyze_conditions.py --strip-conclusion --strong-monitor
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from cotmon import config  # noqa: E402
+from cotmon.data.generate import build_user_turn, strip_conclusion  # noqa: E402
+from cotmon.data.hints import make_hint  # noqa: E402
+from cotmon.monitor import surface as surf  # noqa: E402
+from cotmon.monitor import text_monitor as tm  # noqa: E402
+from cotmon.probe import probe as P  # noqa: E402
+from cotmon.probe.extract import ActivationExtractor  # noqa: E402
+
+RNG = np.random.RandomState(config.SEED)
+
+
+def boot_ci(y, s, q, n_boot=2000, fn=None):
+    """95% CI resampling QUESTIONS (clusters), not traces."""
+    fn = fn or P.auroc
+    qs = np.asarray(q)
+    uniq = np.unique(qs)
+    idx = {u: np.where(qs == u)[0] for u in uniq}
+    vals = []
+    for _ in range(n_boot):
+        rows = np.concatenate([idx[u] for u in RNG.choice(uniq, len(uniq), replace=True)])
+        if len(np.unique(y[rows])) < 2:
+            continue
+        vals.append(fn(y[rows], s[rows]))
+    if not vals:
+        return float("nan"), float("nan")
+    return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="in_path",
+                    default=str(config.DATA_DIR / "traces" / "conditions.jsonl"))
+    ap.add_argument("--strip-conclusion", action="store_true",
+                    help="remove each CoT's own answer statement from EVERY detector's view")
+    ap.add_argument("--strong-monitor", nargs="?", const=config.FAITHFULNESS_JUDGE_MODEL, default=None)
+    ap.add_argument("--no-monitor", action="store_true")
+    args = ap.parse_args()
+
+    rows = [json.loads(l) for l in open(args.in_path)]
+    conditions = sorted({r["condition"] for r in rows})
+    gen_stats = {}
+    gpath = config.RESULTS_DIR / "phase4x_generation.json"
+    if gpath.exists():
+        gen_stats = json.loads(gpath.read_text())
+
+    from datasets import load_dataset
+    ds = load_dataset(config.PRIMARY_DATASET, split="test")
+    qinfo = {}
+    for i, r in enumerate(ds):
+        opts = list(r["options"])
+        while opts and str(opts[-1]).strip().upper() in {"N/A", ""}:
+            opts.pop()
+        qinfo[r.get("question_id", i)] = {"question": r["question"], "options": opts}
+
+    extractor = ActivationExtractor()
+    results = {}
+
+    for cond in conditions:
+        sub = [r for r in rows if r["condition"] == cond]
+        y = np.array([r["label"] for r in sub])
+        q = np.array([r["question_id"] for r in sub])
+        sets = np.array([r["set"] for r in sub])
+        cots = [strip_conclusion(r["cot_text"]) if args.strip_conclusion else r["cot_text"]
+                for r in sub]
+        prompts = [extractor.chat_prompt(build_user_turn(
+            qinfo[r["question_id"]]["question"], qinfo[r["question_id"]]["options"],
+            make_hint(r["hint_family"], r["hint_target"]))) for r in sub]
+
+        tr = np.where(sets == "B")[0]     # probe training questions
+        te = np.where(sets == "C")[0]     # evaluation questions (disjoint by construction)
+        y_tr, y_te, q_te = y[tr], y[te], q[te]
+        print(f"\n=== {cond}: n={len(sub)}  train(B) n={len(tr)} pos={int(y_tr.sum())}  "
+              f"eval(C) n={len(te)} pos={int(y_te.sum())} "
+              f"questions_with_pos={len(np.unique(q_te[y_te == 1]))} ===", flush=True)
+
+        # --- activations: prompt+CoT teacher-forced, pooled over CoT positions ---
+        cache = config.ACTIVATIONS_DIR / f"acts_{cond}{'_stripped' if args.strip_conclusion else ''}.npz"
+        if cache.exists():
+            z = np.load(cache)
+            acts = {p: z[p] for p in config.PROBE_POOLINGS}
+            print(f"[phase4x] loaded {cache}")
+        else:
+            acts = extractor.extract(cots, prompts=prompts)
+            config.ACTIVATIONS_DIR.mkdir(parents=True, exist_ok=True)
+            np.savez(cache, **{p: acts[p].astype(config.ACT_DTYPE) for p in acts})
+            print(f"[phase4x] wrote {cache}")
+
+        # --- probe: sweep cells on TRAIN only, then report that cell on eval ---
+        best = (-1.0, None, None)
+        for pool in config.PROBE_POOLINGS:
+            for j, layer in enumerate(config.PROBE_LAYERS):
+                # cell selection uses a train/train split so eval stays untouched
+                half = len(tr) // 2
+                m = P.train_eval(acts[pool][tr[:half], j, :], y_tr[:half],
+                                 acts[pool][tr[half:], j, :], y_tr[half:], config.PROBE_KIND)
+                if m["auroc"] == m["auroc"] and m["auroc"] > best[0]:
+                    best = (m["auroc"], pool, layer)
+        _, pool, layer = best
+        j = config.PROBE_LAYERS.index(layer)
+        pr = P._PROBES[config.PROBE_KIND]().fit(np.asarray(acts[pool][tr, j, :], np.float32), y_tr)
+        s_probe = pr.decision_scores(np.asarray(acts[pool][te, j, :], np.float32))
+
+        # --- prompt-only floor: same probe recipe, activations of the PROMPT alone ---
+        pcache = config.ACTIVATIONS_DIR / f"acts_{cond}_promptonly.npz"
+        if pcache.exists():
+            pacts = {p: np.load(pcache)[p] for p in config.PROBE_POOLINGS}
+        else:
+            pacts = extractor.extract(prompts)   # no completion -> question+hint only
+            np.savez(pcache, **{p: pacts[p].astype(config.ACT_DTYPE) for p in pacts})
+        ppr = P._PROBES[config.PROBE_KIND]().fit(np.asarray(pacts[pool][tr, j, :], np.float32), y_tr)
+        s_prompt = ppr.decision_scores(np.asarray(pacts[pool][te, j, :], np.float32))
+
+        # --- text detectors ---
+        s_tfidf = surf.TfidfSurfaceBaseline().fit([cots[i] for i in tr], y_tr).scores(
+            [cots[i] for i in te])
+        hints_te = [sub[i]["hint_target"] for i in te]
+        mon = {}
+        if not args.no_monitor:
+            for tag, mdl in [("weak", config.TEXT_MONITOR_MODEL), ("strong", args.strong_monitor)]:
+                if mdl is None:
+                    continue
+                M = tm.TextMonitor(model=mdl, strip_conclusion=False)  # cots already stripped above
+                mon[tag] = np.array(M.predict_scores([cots[i] for i in te], hints_te))
+
+        def row(name, s):
+            lo, hi = boot_ci(y_te, s, q_te)
+            return {"auroc": P.auroc(y_te, s), "ci": [lo, hi],
+                    "tpr@1fpr": P.tpr_at_fpr(y_te, s, 0.01)}
+
+        det = {"probe": row("probe", s_probe), "prompt_only": row("prompt_only", s_prompt),
+               "tfidf": row("tfidf", s_tfidf)}
+        for tag, s in mon.items():
+            det[f"monitor_{tag}"] = row(tag, s)
+        results[cond] = {"cell": {"pooling": pool, "layer": layer,
+                                  "depth_fraction": round(layer / 36, 2)},
+                         "n_eval": len(te), "pos_eval": int(y_te.sum()),
+                         "questions_with_pos": int(len(np.unique(q_te[y_te == 1]))),
+                         "task_accuracy": gen_stats.get(cond, {}).get("task_accuracy"),
+                         "detectors": det}
+
+    # ---- report ----
+    print("\n" + "=" * 96)
+    print(f"{'condition':11s}{'detector':16s}{'AUROC':>8s}{'95% CI':>18s}{'TPR@1%FPR':>11s}"
+          f"{'task_acc':>10s}{'eval_q_pos':>11s}")
+    print("-" * 96)
+    for cond in conditions:
+        r = results[cond]
+        ta = r["task_accuracy"]
+        ta_s = f"{ta:.3f}" if ta is not None else "-"
+        for name, d in r["detectors"].items():
+            ci_s = f"[{d['ci'][0]:.3f}, {d['ci'][1]:.3f}]"
+            print(f"{cond:11s}{name:16s}{d['auroc']:>8.3f}{ci_s:>18s}"
+                  f"{d['tpr@1fpr']:>11.3f}{ta_s:>10s}{r['questions_with_pos']:>11d}")
+        print("-" * 96)
+    print("READ: the probe must beat prompt_only AND tfidf to be doing anything semantic, and must")
+    print("beat monitor_strong to support 'probes see what text monitoring cannot'.")
+
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    out = config.RESULTS_DIR / f"phase4x_analysis{'_stripped' if args.strip_conclusion else ''}.json"
+    out.write_text(json.dumps(results, indent=2))
+    print(f"\n[phase4x] wrote {out}")
+
+
+if __name__ == "__main__":
+    main()

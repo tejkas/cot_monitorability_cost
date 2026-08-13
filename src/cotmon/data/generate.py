@@ -193,7 +193,8 @@ class Generator:
                temperature: Optional[float] = None,
                repetition_penalty: float = 1.0,
                thinking: bool = True,
-               max_tokens: Optional[int] = None) -> List[List[Sample]]:
+               max_tokens: Optional[int] = None,
+               use_lora: bool = True) -> List[List[Sample]]:
         """For each user turn, return k parsed Samples. Batched across all turns.
 
         temperature/repetition_penalty override the config defaults for Phase 4 genuine
@@ -214,8 +215,11 @@ class Generator:
         # Pass the adapter per-request — enable_lora on the engine only makes it POSSIBLE; without
         # a lora_request here the engine runs the BASE model. (This omission silently made all of
         # Phase 4 generate from base — found 2026-08-09.)
+        # One engine serves BOTH conditions: with the adapter (illegible) and without it (legible).
+        # use_lora=False skips the LoRARequest, so the same loaded engine runs the base model —
+        # no second model load, and both conditions see identical prompts and sampling code.
         lora_req = None
-        if self.lora:
+        if self.lora and use_lora:
             from vllm.lora.request import LoRARequest
             lora_req = LoRARequest("t3", 1, self.lora)
         outs = self.llm.generate(prompts, sp, lora_request=lora_req)
