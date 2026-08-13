@@ -85,8 +85,11 @@ def main() -> None:
             opts.pop()
         qinfo[r.get("question_id", i)] = {"question": r["question"], "options": opts}
 
+    # ---------------- PHASE A: all activations first, with ONE HF model loaded ----------------
+    # The extractor holds ~16GB of weights. vLLM then asks for 90% of the card, so the extractor
+    # MUST be freed before any monitor loads (this exact overlap OOM'd an earlier script).
     extractor = ActivationExtractor()
-    results = {}
+    per_cond = {}
 
     for cond in conditions:
         sub = [r for r in rows if r["condition"] == cond]
@@ -120,6 +123,35 @@ def main() -> None:
             np.savez(cache, **{p: acts[p].astype(config.ACT_DTYPE) for p in acts})
             print(f"[phase4x] wrote {cache}")
 
+        # --- prompt-only floor activations: what is knowable from question+hint alone ---
+        pcache = config.ACTIVATIONS_DIR / f"acts_{cond}_n{len(sub)}_promptonly.npz"
+        if pcache.exists():
+            pacts = {p: np.load(pcache)[p] for p in config.PROBE_POOLINGS}
+            print(f"[phase4x] loaded {pcache}")
+        else:
+            pacts = extractor.extract(prompts)   # no completion -> question+hint only
+            np.savez(pcache, **{p: pacts[p].astype(config.ACT_DTYPE) for p in pacts})
+            print(f"[phase4x] wrote {pcache}")
+
+        per_cond[cond] = {"sub": sub, "y": y, "q": q, "cots": cots, "tr": tr, "te": te,
+                          "acts": acts, "pacts": pacts}
+
+    # free the HF model before any vLLM engine starts
+    del extractor
+    import gc
+    import torch
+    gc.collect()
+    torch.cuda.empty_cache()
+    print("\n[phase4x] extractor released; GPU free for the text monitors\n", flush=True)
+
+    # ---------------- PHASE B: probes + surface baseline (CPU only) ----------------
+    results = {}
+    for cond in conditions:
+        d = per_cond[cond]
+        sub, y, q, cots = d["sub"], d["y"], d["q"], d["cots"]
+        tr, te, acts, pacts = d["tr"], d["te"], d["acts"], d["pacts"]
+        y_tr, y_te, q_te = y[tr], y[te], q[te]
+
         # --- probe: sweep cells INSIDE the training set, then report that cell on eval ---
         # The inner split is by QUESTION, not by row: k traces share a question, so a row split
         # would leak siblings between selection-train and selection-val and bias the cell choice.
@@ -147,43 +179,46 @@ def main() -> None:
         pr = P._PROBES[config.PROBE_KIND]().fit(np.asarray(acts[pool][tr, j, :], np.float32), y_tr)
         s_probe = pr.decision_scores(np.asarray(acts[pool][te, j, :], np.float32))
 
-        # --- prompt-only floor: same probe recipe, activations of the PROMPT alone ---
-        pcache = config.ACTIVATIONS_DIR / f"acts_{cond}_n{len(sub)}_promptonly.npz"
-        if pcache.exists():
-            pacts = {p: np.load(pcache)[p] for p in config.PROBE_POOLINGS}
-        else:
-            pacts = extractor.extract(prompts)   # no completion -> question+hint only
-            np.savez(pcache, **{p: pacts[p].astype(config.ACT_DTYPE) for p in pacts})
+        # prompt-only floor: identical probe recipe, activations of the PROMPT alone
         ppr = P._PROBES[config.PROBE_KIND]().fit(np.asarray(pacts[pool][tr, j, :], np.float32), y_tr)
         s_prompt = ppr.decision_scores(np.asarray(pacts[pool][te, j, :], np.float32))
 
-        # --- text detectors ---
         s_tfidf = surf.TfidfSurfaceBaseline().fit([cots[i] for i in tr], y_tr).scores(
             [cots[i] for i in te])
-        hints_te = [sub[i]["hint_target"] for i in te]
-        mon = {}
-        if not args.no_monitor:
-            for tag, mdl in [("weak", config.TEXT_MONITOR_MODEL), ("strong", args.strong_monitor)]:
-                if mdl is None:
-                    continue
-                M = tm.TextMonitor(model=mdl, strip_conclusion=False)  # cots already stripped above
-                mon[tag] = np.array(M.predict_scores([cots[i] for i in te], hints_te))
 
-        def row(name, s):
-            lo, hi = boot_ci(y_te, s, q_te)
-            return {"auroc": P.auroc(y_te, s), "ci": [lo, hi],
-                    "tpr@1fpr": P.tpr_at_fpr(y_te, s, 0.01)}
-
-        det = {"probe": row("probe", s_probe), "prompt_only": row("prompt_only", s_prompt),
-               "tfidf": row("tfidf", s_tfidf)}
-        for tag, s in mon.items():
-            det[f"monitor_{tag}"] = row(tag, s)
+        d["scores"] = {"probe": s_probe, "prompt_only": s_prompt, "tfidf": s_tfidf}
         results[cond] = {"cell": {"pooling": pool, "layer": layer,
                                   "depth_fraction": round(layer / 36, 2)},
                          "n_eval": len(te), "pos_eval": int(y_te.sum()),
                          "questions_with_pos": int(len(np.unique(q_te[y_te == 1]))),
-                         "task_accuracy": gen_stats.get(cond, {}).get("task_accuracy"),
-                         "detectors": det}
+                         "task_accuracy": gen_stats.get(cond, {}).get("task_accuracy")}
+
+    # ---------------- PHASE C: text monitors — load each model ONCE, score every condition ----
+    if not args.no_monitor:
+        for tag, mdl in [("weak", config.TEXT_MONITOR_MODEL), ("strong", args.strong_monitor)]:
+            if mdl is None:
+                continue
+            print(f"[phase4x] monitor '{tag}': {mdl}", flush=True)
+            M = tm.TextMonitor(model=mdl, strip_conclusion=False)  # cots already stripped above
+            for cond in conditions:
+                d = per_cond[cond]
+                te, sub, cots = d["te"], d["sub"], d["cots"]
+                d["scores"][f"monitor_{tag}"] = np.array(M.predict_scores(
+                    [cots[i] for i in te], [sub[i]["hint_target"] for i in te]))
+            del M
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    # ---------------- assemble ----------------
+    for cond in conditions:
+        d = per_cond[cond]
+        y_te, q_te = d["y"][d["te"]], d["q"][d["te"]]
+        det = {}
+        for name, s in d["scores"].items():
+            lo, hi = boot_ci(y_te, s, q_te)
+            det[name] = {"auroc": P.auroc(y_te, s), "ci": [lo, hi],
+                         "tpr@1fpr": P.tpr_at_fpr(y_te, s, 0.01)}
+        results[cond]["detectors"] = det
 
     # ---- report ----
     print("\n" + "=" * 96)

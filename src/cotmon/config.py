@@ -56,8 +56,10 @@ PROBE_TRAIN_TIER = "T0_verbatim"   # train the probe on this tier, then eval acr
 ACT_DTYPE = "float16"              # cache activations as fp16 (halves disk)
 FAITH_MAX_GAP = 0.10               # faithfulness gate: recovery(T0) - recovery(T1) above this = unfaithful
 EXTRACT_BATCH_SIZE = 8            # re-encode batch (reduce if the card OOMs on long T0)
-EXTRACT_MAX_LEN = 8192           # H100/80GB: covers every CoT (gen capped at 8192) -> NO truncation.
-                                 # (was 4096 on the 40GB A100, which clipped the long-trace tail.)
+EXTRACT_MAX_LEN = 12288          # prompt + CoT must BOTH fit: generation is capped at 8192 CoT
+                                 # tokens, so 8192 here would clip the prompt off long traces.
+                                 # 12288 on the 80GB H100 -> ~46GB peak at batch 8. NO truncation.
+                                 # (4096 on the 40GB A100 clipped the long-trace tail entirely.)
 
 # ---- Phase 4: genuine LoRA (fine-tune the base model to reason in T3 style) ----
 LORA_TRAIN_TIER = "T3_heavy"     # which tier's rewrites the LoRA imitates (the illegible target)
